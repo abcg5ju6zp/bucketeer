@@ -48,12 +48,14 @@ func TestNewExperimentService(t *testing.T) {
 	goalStorageMock := storagemock.NewMockGoalStorage(mockController)
 	p := publishermock.NewMockPublisher(mockController)
 	logger := zap.NewNop()
+	terminationStorageMock := storagemock.NewMockTerminationStorage(mockController)
 	s := NewExperimentService(
 		featureClientMock,
 		accountClientMock,
 		autoOpsClientMock,
 		dbClientMock,
 		experimentStorageMock,
+		terminationStorageMock,
 		goalStorageMock,
 		p,
 		WithLogger(logger),
@@ -131,14 +133,15 @@ func createExperimentService(c *gomock.Controller, specifiedEnvironmentId *strin
 	p := publishermock.NewMockPublisher(c)
 	p.EXPECT().Publish(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	return &experimentService{
-		featureClient:     featureClientMock,
-		accountClient:     accountClientMock,
-		autoOpsClient:     autoOpsClientMock,
-		dbClient:          dbClientMock,
-		experimentStorage: storagemock.NewMockExperimentStorage(c),
-		goalStorage:       storagemock.NewMockGoalStorage(c),
-		publisher:         p,
-		logger:            zap.NewNop().Named("api"),
+		featureClient:      featureClientMock,
+		accountClient:      accountClientMock,
+		autoOpsClient:      autoOpsClientMock,
+		dbClient:           dbClientMock,
+		experimentStorage:  storagemock.NewMockExperimentStorage(c),
+		terminationStorage: storagemock.NewMockTerminationStorage(c),
+		goalStorage:        storagemock.NewMockGoalStorage(c),
+		publisher:          p,
+		logger:             zap.NewNop().Named("api"),
 	}
 }
 

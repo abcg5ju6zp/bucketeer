@@ -38,6 +38,7 @@
     "archive-experiment": "エクスペリメントをアーカイブ",
     "unarchive-experiment": "エクスペリメントのアーカイブを解除",
     "stop-experiment": "エクスペリメントを停止",
+    "finalizing-experiment": "最終結果を生成中…",
     "start-experiment": "エクスペリメントを開始",
     "archive-flag": "フィーチャーフラグをアーカイブ",
     "unarchive-flag": "フィーチャーフラグのアーカイブを解除",
@@ -135,12 +136,14 @@
     "scheduled-experiment": "スケジュール",
     "running-experiment": "実行中",
     "stopped-experiment": "終了",
+    "finalizing-experiment": "最終結果を生成中",
     "not-started-experiment": "未開始エクスペリメント",
     "confirm-stop-desc": "エクスペリメント「<bold>{{name}}</bold>」が停止されます。続行してもよろしいですか？",
     "confirm-start-desc": "エクスペリメント「<bold>{{name}}</bold>」が開始されます。続行してもよろしいですか？",
     "running-experiment-desc": "{{date}}に終了予定",
     "scheduled-experiment-desc": "{{date}}に開始予定",
     "stopped-experiment-desc": "エクスペリメントは終了しています",
+    "finalizing-experiment-desc": "最終統計を生成し、最終結果が確定するまでこの状態が続きます。",
     "not-started-experiment-desc": "これは手動開始のエクスペリメントです"
   },
   "results": {

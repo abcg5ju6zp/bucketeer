@@ -18,6 +18,8 @@ SELECT
     ex.base_variation_id,
     ex.maintainer,
     ex.status,
+    ex.termination_id,
+    ex.final_result_id,
     (
         SELECT
             jsonb_agg(jsonb_build_object('id', goal.id, 'name', goal.name))

@@ -728,6 +728,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 	var autoOpsStorage v2aos.AutoOpsRuleStorage
 	var prStorage v2aos.ProgressiveRolloutStorage
 	var experimentStorage v2exs.ExperimentStorage
+	var terminationStorage v2exs.TerminationStorage
 	var goalStorage v2exs.GoalStorage
 	var experimentResultStorage v2er.ExperimentResultStorage
 	var monthlySummaryStorage insightsstorage.MonthlySummaryStorage
@@ -762,6 +763,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		autoOpsStorage = autoopspostgres.NewAutoOpsRuleStorage(postgresClient)
 		prStorage = autoopspostgres.NewProgressiveRolloutStorage(postgresClient)
 		experimentStorage = experimentpostgres.NewExperimentStorage(postgresClient)
+		terminationStorage = experimentpostgres.NewTerminationStorage(postgresClient)
 		goalStorage = experimentpostgres.NewGoalStorage(postgresClient)
 		experimentResultStorage = eventcounterpostgres.NewExperimentResultStorage(postgresClient)
 		monthlySummaryStorage = insightspostgres.NewMonthlySummaryStorage(postgresClient)
@@ -790,6 +792,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		prStorage = autoopsmysql.NewProgressiveRolloutStorage(mysqlClient)
 		experimentResultStorage = eventcountermysql.NewExperimentResultStorage(mysqlClient)
 		experimentStorage = experimentmysql.NewExperimentStorage(mysqlClient)
+		terminationStorage = experimentmysql.NewTerminationStorage(mysqlClient)
 		goalStorage = experimentmysql.NewGoalStorage(mysqlClient)
 		monthlySummaryStorage = insightsmysql.NewMonthlySummaryStorage(mysqlClient)
 		subscriptionStorage = subscriptionmysql.NewSubscriptionStorage(mysqlClient)
@@ -1107,6 +1110,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		autoOpsClient,
 		dbClient,
 		experimentStorage,
+		terminationStorage,
 		goalStorage,
 		domainTopicPublisher,
 		experimentapi.WithLogger(logger),

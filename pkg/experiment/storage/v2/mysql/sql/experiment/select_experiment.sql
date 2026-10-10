@@ -18,6 +18,8 @@ SELECT
     ex.base_variation_id,
     ex.maintainer,
     ex.status,
+    ex.termination_id,
+    ex.final_result_id,
     (
         SELECT
             JSON_ARRAYAGG(JSON_OBJECT('id', goal.id, 'name', goal.name))

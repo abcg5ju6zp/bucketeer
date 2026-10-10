@@ -209,6 +209,9 @@ cronjob:
     - name: experiment-calculator
       jobId: ExperimentCalculator
       schedule: "*/30 * * * *"
+    - name: experiment-finalizer
+      jobId: ExperimentFinalizer
+      schedule: "* * * * *"
     - name: feature-flag-cacher
       jobId: FeatureFlagCacher
       schedule: "* * * * *"

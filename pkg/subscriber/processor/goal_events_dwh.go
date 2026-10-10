@@ -49,6 +49,7 @@ type goalEvtWriter struct {
 	redisClient             redisv3.Client
 	locker                  *GoalEventLocker
 	cache                   cachev3.ExperimentsCache
+	watermarkRecorder       EventWatermarkRecorder
 	flightgroup             singleflight.Group
 	location                *time.Location
 	logger                  *zap.Logger
@@ -70,6 +71,7 @@ func NewGoalEventWriter(
 	retryGoalEventInterval time.Duration,
 	goalWriter dwhstorage.GoalEventWriter,
 	eventStorage ecdwh.EventStorage,
+	watermarkRecorder EventWatermarkRecorder,
 ) Writer {
 	if retryGoalEventInterval == 0 {
 		retryGoalEventInterval = defaultRetryGoalEventInterval
@@ -99,6 +101,7 @@ func NewGoalEventWriter(
 		redisClient:             redisClient,
 		locker:                  NewGoalEventLocker(redisClient, lockTTL),
 		cache:                   cache,
+		watermarkRecorder:       watermarkRecorder,
 		location:                location,
 		logger:                  logger,
 		maxRetryGoalEventPeriod: maxRetryGoalEventPeriod,
@@ -199,6 +202,12 @@ func (w *goalEvtWriter) Write(
 		w.logger.Error("Failed to append goal events",
 			zap.Any("goalEvents", failedToAppendMap),
 		)
+	}
+	// Advance the goal-event watermark with the highest timestamp that was
+	// durably persisted in this batch, per environment.
+	for envID, highWater := range highWaterByEnvironment(goalEvents, fails) {
+		recordWatermark(ctx, w.logger, w.watermarkRecorder,
+			envID, watermarkEventTypeGoal, highWater)
 	}
 	return fails
 }
@@ -415,14 +424,19 @@ func (w *goalEvtWriter) listExperiments(
 				// Because the evaluation and goal events may be sent with a delay
 				// for many reasons from the client side, we still calculate
 				// the results for two days after it stopped.
-				StopAt:        time.Now().In(w.location).Add(-2 * day).Unix(),
-				PageSize:      0,
-				EnvironmentId: environmentId,
+				StopAt:   time.Now().In(w.location).Add(-2 * day).Unix(),
+				PageSize: 0,
+				// FINALIZING experiments keep accepting events until their final
+				// result is confirmed; already-finalized ones are excluded so
+				// their attribution stops.
 				Statuses: []exproto.Experiment_Status{
 					exproto.Experiment_RUNNING,
+					exproto.Experiment_FINALIZING,
 					exproto.Experiment_STOPPED,
 				},
-				Archived: wrapperspb.Bool(false),
+				ExcludeFinalized: true,
+				EnvironmentId:    environmentId,
+				Archived:         wrapperspb.Bool(false),
 			})
 			if err != nil {
 				return nil, err

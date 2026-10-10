@@ -17,9 +17,12 @@ INSERT INTO experiment (
     description,
     base_variation_id,
     status,
+    termination_id,
+    final_result_id,
     maintainer,
     environment_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+    $21, $22
 )

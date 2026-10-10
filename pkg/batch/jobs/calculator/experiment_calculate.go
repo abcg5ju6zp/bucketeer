@@ -86,6 +86,35 @@ func NewExperimentCalculate(
 		location,
 		dopts.Logger,
 	)
+	return NewExperimentCalculateWithCalculator(
+		calculator,
+		environmentClient,
+		experimentClient,
+		experimentLock,
+		location,
+		opts...,
+	)
+}
+
+// NewExperimentCalculateWithCalculator builds the recurring real-time
+// calculation job from an already-constructed calculator, so the same
+// calculator instance (and its Stan client/metrics) can be shared with the
+// one-time experiment finalizer.
+func NewExperimentCalculateWithCalculator(
+	calculator *experimentcalc.ExperimentCalculator,
+	environmentClient environmentclient.Client,
+	experimentClient experimentclient.Client,
+	experimentLock *ExperimentLock,
+	location *time.Location,
+	opts ...jobs.Option,
+) jobs.Job {
+	dopts := &jobs.Options{
+		Timeout: 1 * time.Minute,
+		Logger:  zap.NewNop(),
+	}
+	for _, opt := range opts {
+		opt(dopts)
+	}
 	return &experimentCalculate{
 		environmentClient: environmentClient,
 		experimentClient:  experimentClient,
@@ -159,6 +188,19 @@ func (e *experimentCalculate) runCalculation() {
 			continue
 		}
 		for _, ex := range experiments {
+			// An experiment with a confirmed final result is frozen: its
+			// final statistics must never be overwritten by recurring
+			// real-time calculations.
+			if ex.FinalResultId != "" {
+				e.logger.Debug("Skipping recalculation of finalized experiment",
+					log.FieldsFromIncomingContext(ctxWithTimeout).AddFields(
+						zap.String("environmentId", env.Id),
+						zap.String("experimentId", ex.Id),
+						zap.String("finalResultId", ex.FinalResultId),
+					)...,
+				)
+				continue
+			}
 			calculateErr := e.calculateExperimentWithLock(ctxWithTimeout, env, ex)
 			if calculateErr != nil {
 				e.logger.Error("Failed to calculate experiment",

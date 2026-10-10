@@ -101,6 +101,9 @@ cronjob:
     - name: experiment-calculator
       jobId: ExperimentCalculator
       schedule: "* * * * *"
+    - name: experiment-finalizer
+      jobId: ExperimentFinalizer
+      schedule: "* * * * *"
     - name: tag-deleter
       jobId: TagDeleter
       schedule: "* * * * *"

@@ -75,6 +75,8 @@ func (s *experimentStorage) CreateExperiment(
 		e.Description,
 		e.BaseVariationId,
 		int32(e.Status),
+		e.TerminationId,
+		e.FinalResultId,
 		e.Maintainer,
 		environmentId,
 	)
@@ -113,6 +115,8 @@ func (s *experimentStorage) UpdateExperiment(
 		e.BaseVariationId,
 		e.Maintainer,
 		int32(e.Status),
+		e.TerminationId,
+		e.FinalResultId,
 		e.Id,
 		environmentId,
 	)
@@ -160,6 +164,8 @@ func (s *experimentStorage) GetExperiment(
 		&experiment.BaseVariationId,
 		&experiment.Maintainer,
 		&status,
+		&experiment.TerminationId,
+		&experiment.FinalResultId,
 		&mysqlstorage.JSONObject{Val: &experiment.Goals},
 	)
 	if err != nil {
@@ -212,6 +218,8 @@ func (s *experimentStorage) ListExperiments(
 			&experiment.BaseVariationId,
 			&experiment.Maintainer,
 			&status,
+			&experiment.TerminationId,
+			&experiment.FinalResultId,
 			&mysqlstorage.JSONObject{Val: &experiment.Goals},
 		)
 		if err != nil {
@@ -320,6 +328,16 @@ func listExperimentsOptionsFromParams(
 			Column:   "maintainer",
 			Operator: mysqlstorage.OperatorEqual,
 			Value:    p.Maintainer,
+		})
+	}
+	if p.ExcludeFinalized {
+		// final_result_id is set only when the terminal status is bound to the
+		// confirmed final result, so an empty value keeps every experiment
+		// whose events may still be attributed.
+		filters = append(filters, &mysqlstorage.FilterV2{
+			Column:   "final_result_id",
+			Operator: mysqlstorage.OperatorEqual,
+			Value:    "",
 		})
 	}
 	var inFilters []*mysqlstorage.InFilter

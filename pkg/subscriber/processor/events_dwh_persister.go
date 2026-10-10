@@ -70,6 +70,7 @@ func NewEventsDWHPersister(
 	persistentRedisClient redisv3.Client,
 	exClient experimentclient.Client,
 	ftClient featureclient.Client,
+	watermarkRecorder EventWatermarkRecorder,
 	persisterName string,
 	logger *zap.Logger,
 ) (subscriber.PubSubProcessor, error) {
@@ -100,7 +101,7 @@ func NewEventsDWHPersister(
 	switch persisterName {
 	case EvaluationCountEventDWHPersisterName:
 		e.subscriberType = subscriberEvaluationEventDWH
-		e.writer = NewEvalEventWriter(logger, exClient, experimentsCache, location, evalEventWriter)
+		e.writer = NewEvalEventWriter(logger, exClient, experimentsCache, location, evalEventWriter, watermarkRecorder)
 
 	case GoalCountEventDWHPersisterName:
 		e.subscriberType = subscriberGoalEventDWH
@@ -118,6 +119,7 @@ func NewEventsDWHPersister(
 			retryInterval,
 			goalEventWriter,
 			goalEventStorage,
+			watermarkRecorder,
 		)
 	}
 	return e, nil

@@ -842,6 +842,7 @@ func newBatchService(t *testing.T,
 			nil,
 			jobs.WithLogger(logger),
 		),
+		nil, // experiment finalizer
 		logger,
 	)
 	return service

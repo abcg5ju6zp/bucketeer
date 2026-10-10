@@ -39,6 +39,7 @@ import (
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/calculator"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/deleter"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/experiment"
+	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/finalizer"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/monthlysummary"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/notification"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs/opsevent"
@@ -55,7 +56,14 @@ import (
 	environmentmysql "github.com/bucketeer-io/bucketeer/v2/pkg/environment/storage/v2/mysql"
 	environmentpostgres "github.com/bucketeer-io/bucketeer/v2/pkg/environment/storage/v2/postgres"
 	ecclient "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/client"
+	v2ewm "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/operational_database"
+	operationalmysql "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/operational_database/mysql"
+	operationalpostgres "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/operational_database/postgres"
 	experimentclient "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/client"
+	v2exs "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/storage/v2"
+	experimentmysql "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/storage/v2/mysql"
+	experimentpostgres "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/storage/v2/postgres"
+	experimentcalc "github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/experimentcalc"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/stan"
 	v2ecrs "github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/storage/v2"
 	experimentcalcmysql "github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/storage/v2/mysql"
@@ -417,6 +425,8 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 	var opsCountStorage v2os.OpsCountStorage
 	var codeRefStorage coderefstorage.CodeReferenceStorage
 	var experimentResultStorage v2ecrs.ExperimentResultStorage
+	var terminationStorage v2exs.TerminationStorage
+	var watermarkStorage v2ewm.EventWatermarkStorage
 	var monthlySummaryStorage insightsstorage.MonthlySummaryStorage
 	var scheduledFlagChangeStorage v2fs.ScheduledFlagChangeStorage
 	if *s.operationalDatabaseType == "postgres" {
@@ -436,6 +446,8 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		opsCountStorage = opseventpostgres.NewOpsCountStorage(postgresClient)
 		codeRefStorage = coderefpostgres.NewCodeReferenceStorage(postgresClient)
 		experimentResultStorage = experimentcalcpostgres.NewExperimentResultStorage(postgresClient)
+		terminationStorage = experimentpostgres.NewTerminationStorage(postgresClient)
+		watermarkStorage = operationalpostgres.NewEventWatermarkStorage(postgresClient)
 		monthlySummaryStorage = insightspostgres.NewMonthlySummaryStorage(postgresClient)
 		scheduledFlagChangeStorage = featurepostgres.NewScheduledFlagChangeStorage(postgresClient)
 	} else {
@@ -447,6 +459,8 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		opsCountStorage = opseventmysql.NewOpsCountStorage(mysqlClient)
 		codeRefStorage = coderefmysql.NewCodeReferenceStorage(mysqlClient)
 		experimentResultStorage = experimentcalcmysql.NewExperimentResultStorage(mysqlClient)
+		terminationStorage = experimentmysql.NewTerminationStorage(mysqlClient)
+		watermarkStorage = operationalmysql.NewEventWatermarkStorage(mysqlClient)
 		monthlySummaryStorage = insightsmysql.NewMonthlySummaryStorage(mysqlClient)
 		scheduledFlagChangeStorage = featuremysql.NewScheduledFlagChangeStorage(mysqlClient)
 	}
@@ -669,6 +683,53 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		}
 	}
 
+	// Single calculator instance shared by the recurring real-time
+	// calculation job and the one-time finalization calculation.
+	sharedStan := stan.NewStan(*s.stanHost, *s.stanPort, registerer, logger)
+	experimentCalculator := experimentcalc.NewExperimentCalculator(
+		sharedStan,
+		*s.stanModelID,
+		environmentClient,
+		eventCounterClient,
+		experimentClient,
+		featureClient,
+		experimentResultStorage,
+		registerer,
+		location,
+		logger,
+	)
+	experimentLock := calculator.NewExperimentLock(nonPersistentRedisClient, *s.experimentLockTTL)
+	experimentCalcJob := calculator.NewExperimentCalculateWithCalculator(
+		experimentCalculator,
+		environmentClient,
+		experimentClient,
+		experimentLock,
+		location,
+		jobs.WithTimeout(30*time.Minute),
+		jobs.WithLogger(logger),
+		jobs.WithMetrics(registerer),
+	)
+
+	// The finalizer publishes the post-confirmation cache state using the
+	// same Redis caches as the experiment cacher.
+	finalizerExperimentCaches := make([]cachev3.ExperimentsCache, 0, len(nonPersistentRedisCaches))
+	for _, redisCaches := range nonPersistentRedisCaches {
+		finalizerExperimentCaches = append(finalizerExperimentCaches, cachev3.NewExperimentsCache(redisCaches))
+	}
+	experimentFinalizer := finalizer.NewExperimentFinalizer(
+		environmentClient,
+		experimentClient,
+		terminationStorage,
+		watermarkStorage,
+		experimentCalculator,
+		experimentResultStorage,
+		finalizerExperimentCaches,
+		location,
+		jobs.WithTimeout(30*time.Minute),
+		jobs.WithLogger(logger),
+		jobs.WithMetrics(registerer),
+	)
+
 	service := api.NewBatchService(
 		experiment.NewExperimentStatusUpdater(
 			environmentClient,
@@ -722,20 +783,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 			jobs.WithTimeout(5*time.Minute),
 			jobs.WithLogger(logger),
 		),
-		calculator.NewExperimentCalculate(
-			stan.NewStan(*s.stanHost, *s.stanPort, registerer, logger),
-			*s.stanModelID,
-			environmentClient,
-			experimentClient,
-			eventCounterClient,
-			featureClient,
-			experimentResultStorage,
-			calculator.NewExperimentLock(nonPersistentRedisClient, *s.experimentLockTTL),
-			location,
-			jobs.WithTimeout(30*time.Minute),
-			jobs.WithLogger(logger),
-			jobs.WithMetrics(registerer),
-		),
+		experimentCalcJob,
 		cacher.NewFeatureFlagCacher(
 			featureStorage,
 			nonPersistentRedisCaches,
@@ -792,6 +840,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 			promClient,
 			jobs.WithLogger(logger),
 		),
+		experimentFinalizer,
 		logger,
 	)
 

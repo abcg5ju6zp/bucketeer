@@ -31,6 +31,7 @@ import (
 	envclient "github.com/bucketeer-io/bucketeer/v2/pkg/environment/client"
 	ecclient "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/client"
 	experimentclient "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/client"
+	experimentdomain "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/domain"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/domain"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/stan"
 	v2es "github.com/bucketeer-io/bucketeer/v2/pkg/experimentcalculator/storage/v2"
@@ -98,7 +99,12 @@ func NewExperimentCalculator(
 
 func (e ExperimentCalculator) Run(ctx context.Context, request *domain.ExperimentCalculatorReq) error {
 	startTime := time.Now()
-	experimentResult, calculationErr := e.createExperimentResult(ctx, request.EnvironmentId, request.Experiment)
+	experimentResult, _, calculationErr := e.compute(
+		ctx,
+		request.EnvironmentId,
+		request.Experiment,
+		time.Now().In(e.location).Unix(),
+	)
 	if calculationErr != nil {
 		e.logger.Error("ExperimentCalculator failed to calculate experiment result",
 			log.FieldsFromIncomingContext(ctx).AddFields(
@@ -133,11 +139,31 @@ func (e ExperimentCalculator) Run(ctx context.Context, request *domain.Experimen
 	return nil
 }
 
-func (e ExperimentCalculator) createExperimentResult(
+// RunFinal computes the one-time final statistics for an experiment
+// finalization. The experiment argument must be the fixed termination
+// snapshot; its StopAt is the fixed counting boundary, so every compute owner
+// (including an owner taking over after a lock loss) computes over exactly the
+// same input. The returned InputSummary captures the sufficient statistics
+// (per-goal, per-variation evaluation/goal counts at the fixed end timestamp)
+// that are persisted on the termination record together with the final result.
+func (e ExperimentCalculator) RunFinal(
+	ctx context.Context,
+	environmentID string,
+	experiment *experiment.Experiment,
+) (*domain.ExperimentResult, *experimentdomain.InputSummary, error) {
+	experimentResult, summary, err := e.compute(ctx, environmentID, experiment, experiment.StopAt)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &domain.ExperimentResult{ExperimentResult: experimentResult}, summary, nil
+}
+
+func (e *ExperimentCalculator) compute(
 	ctx context.Context,
 	envNamespace string,
 	experiment *experiment.Experiment,
-) (*eventcounter.ExperimentResult, error) {
+	endAt int64,
+) (*eventcounter.ExperimentResult, *experimentdomain.InputSummary, error) {
 	experimentResult := &eventcounter.ExperimentResult{
 		Id:           experiment.Id,
 		ExperimentId: experiment.Id,
@@ -147,7 +173,8 @@ func (e ExperimentCalculator) createExperimentResult(
 	for _, variation := range experiment.Variations {
 		variationIDs = append(variationIDs, variation.Id)
 	}
-	endAts := listEndAt(experiment.StartAt, experiment.StopAt, time.Now().In(e.location).Unix())
+	endAts := listEndAt(experiment.StartAt, experiment.StopAt, endAt)
+	goalSummaries := make([]*experimentdomain.GoalInputSummary, 0, len(experiment.GoalIds))
 	for _, goalID := range experiment.GoalIds {
 		goalResult := &eventcounter.GoalResult{
 			GoalId:  goalID,
@@ -158,7 +185,10 @@ func (e ExperimentCalculator) createExperimentResult(
 				VariationId: v.Id,
 			})
 		}
-		for _, timestamp := range endAts {
+		// Counts at the fixed final timestamp, captured for the final
+		// calculation input summary.
+		var finalEvalVc, finalGoalVc map[string]*eventcounter.VariationCount
+		for i, timestamp := range endAts {
 			evalVc, evalErr := e.getEvaluationCount(ctx, &eventcounter.GetExperimentEvaluationCountRequest{
 				EnvironmentId:  envNamespace,
 				StartAt:        experiment.StartAt,
@@ -175,7 +205,7 @@ func (e ExperimentCalculator) createExperimentResult(
 						zap.Error(evalErr),
 					)...,
 				)
-				return nil, errFailedToGetEvalVariationCount
+				return nil, nil, errFailedToGetEvalVariationCount
 			}
 			goalVc, goalErr := e.getGoalCount(ctx, &eventcounter.GetExperimentGoalCountRequest{
 				EnvironmentId:  envNamespace,
@@ -194,7 +224,10 @@ func (e ExperimentCalculator) createExperimentResult(
 						zap.Error(goalErr),
 					)...,
 				)
-				return nil, errFailedToGetGoalEventCount
+				return nil, nil, errFailedToGetGoalEventCount
+			}
+			if i == len(endAts)-1 {
+				finalEvalVc, finalGoalVc = evalVc, goalVc
 			}
 			gr := e.calcGoalResult(ctx, evalVc, goalVc, experiment)
 			gr.GoalId = goalID
@@ -224,6 +257,9 @@ func (e ExperimentCalculator) createExperimentResult(
 		// Calculate Summary for this goal result
 		e.calculateSummary(ctx, goalResult, experiment.BaseVariationId)
 
+		goalSummaries = append(goalSummaries, buildGoalInputSummary(
+			goalID, experiment.Variations, finalEvalVc, finalGoalVc))
+
 		experimentResult.GoalResults = append(experimentResult.GoalResults, goalResult)
 	}
 
@@ -249,7 +285,38 @@ func (e ExperimentCalculator) createExperimentResult(
 	// result's variation breakdown.
 	experimentResult.SrmResult = e.computeExperimentSRM(ctx, envNamespace, experiment, experimentResult.GoalResults)
 
-	return experimentResult, nil
+	inputSummary := &experimentdomain.InputSummary{
+		EndAt:                    endAts[len(endAts)-1],
+		Goals:                    goalSummaries,
+		TotalEvaluationUserCount: totalEvaluationUserCount,
+	}
+	return experimentResult, inputSummary, nil
+}
+
+// buildGoalInputSummary captures the fixed input of the final calculation for
+// one goal at the final timestamp: the evaluation and goal sufficient
+// statistics per variation, in the snapshot's variation order.
+func buildGoalInputSummary(
+	goalID string,
+	variations []*featureproto.Variation,
+	evalVc map[string]*eventcounter.VariationCount,
+	goalVc map[string]*eventcounter.VariationCount,
+) *experimentdomain.GoalInputSummary {
+	summary := &experimentdomain.GoalInputSummary{GoalID: goalID}
+	for _, v := range variations {
+		item := &experimentdomain.VariationInputSummary{VariationID: v.Id}
+		if c, ok := evalVc[v.Id]; ok {
+			item.EvaluationUserCount = c.UserCount
+			item.EvaluationEventCount = c.EventCount
+		}
+		if c, ok := goalVc[v.Id]; ok {
+			item.GoalUserCount = c.UserCount
+			item.GoalEventCount = c.EventCount
+			item.GoalValueSum = c.ValueSum
+		}
+		summary.Variations = append(summary.Variations, item)
+	}
+	return summary
 }
 
 // computeExperimentSRM fetches the feature definition for `experiment` and runs

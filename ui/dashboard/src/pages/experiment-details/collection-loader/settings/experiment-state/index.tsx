@@ -37,6 +37,7 @@ const ExperimentState = ({
   const { notify, errorNotify } = useToast();
   const isRunning = experiment.status === 'RUNNING',
     isWaiting = experiment.status === 'WAITING',
+    isFinalizing = experiment.status === 'FINALIZING',
     isStopped = ['STOPPED', 'FORCE_STOPPED'].includes(experiment.status);
 
   const totalUsers = useMemo(() => {
@@ -102,37 +103,43 @@ const ExperimentState = ({
             icon={
               isRunning
                 ? IconExperiment
-                : isWaiting
-                  ? IconWaitingExperiment
-                  : isStopped
-                    ? IconStoppedExperiment
-                    : IconNotStartedExperiment
+                : isFinalizing
+                  ? IconExperiment
+                  : isWaiting
+                    ? IconWaitingExperiment
+                    : isStopped
+                      ? IconStoppedExperiment
+                      : IconNotStartedExperiment
             }
             size={'md'}
             className="[&>svg]:size-6"
           />
           <p className="typo-head-bold-small text-gray-700 whitespace-nowrap">
             {t(
-              isRunning
-                ? `experiment.running-experiment`
-                : isWaiting
-                  ? `experiment.scheduled-experiment`
-                  : isStopped
-                    ? `experiment.stopped-experiment`
-                    : `experiment.not-started-experiment`
+              isFinalizing
+                ? `experiment.finalizing-experiment`
+                : isRunning
+                  ? `experiment.running-experiment`
+                  : isWaiting
+                    ? `experiment.scheduled-experiment`
+                    : isStopped
+                      ? `experiment.stopped-experiment`
+                      : `experiment.not-started-experiment`
             )}
           </p>
         </div>
         <div className="px-3 typo-para-small text-gray-700 whitespace-nowrap">
           <Trans
             i18nKey={
-              isRunning
-                ? 'table:experiment.running-experiment-desc'
-                : isWaiting
-                  ? 'table:experiment.scheduled-experiment-desc'
-                  : isStopped
-                    ? 'table:experiment.stopped-experiment-desc'
-                    : 'table:experiment.not-started-experiment-desc'
+              isFinalizing
+                ? 'table:experiment.finalizing-experiment-desc'
+                : isRunning
+                  ? 'table:experiment.running-experiment-desc'
+                  : isWaiting
+                    ? 'table:experiment.scheduled-experiment-desc'
+                    : isStopped
+                      ? 'table:experiment.stopped-experiment-desc'
+                      : 'table:experiment.not-started-experiment-desc'
             }
             values={{
               date: formatLongDateTime({
@@ -168,7 +175,7 @@ const ExperimentState = ({
         hidden={editable}
         trigger={
           <Button
-            disabled={isStopped || !editable}
+            disabled={isStopped || isFinalizing || !editable}
             variant={'text'}
             className={cn('!typo-para-small h-10 whitespace-nowrap', {
               'text-accent-red-500 hover:text-accent-red-600': isRunning
@@ -180,7 +187,11 @@ const ExperimentState = ({
               size={'sm'}
             />
             {t(
-              isRunning ? `popover.stop-experiment` : `popover.start-experiment`
+              isFinalizing
+                ? `popover.finalizing-experiment`
+                : isRunning
+                  ? `popover.stop-experiment`
+                  : `popover.start-experiment`
             )}
           </Button>
         }

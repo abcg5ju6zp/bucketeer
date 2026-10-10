@@ -77,6 +77,11 @@ type ListExperimentsParams struct {
 	OrderDirection proto.ListExperimentsRequest_OrderDirection
 	PageSize       int
 	Cursor         string
+	// ExcludeFinalized filters out experiments whose terminal status already
+	// references a confirmed final result (final_result_id is set). It is used
+	// by the event attribution cache builders so that finalized experiments
+	// stop accepting evaluation/goal events.
+	ExcludeFinalized bool
 }
 
 type ExperimentSummary struct {

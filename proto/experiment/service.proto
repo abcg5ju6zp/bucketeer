@@ -147,6 +147,11 @@ message ListExperimentsRequest {
   google.protobuf.BoolValue archived = 13;
   repeated Experiment.Status statuses = 14;
   string environment_id = 15 [(google.api.field_behavior) = REQUIRED];
+  // exclude_finalized filters out experiments whose terminal STOPPED /
+  // FORCE_STOPPED status already references a confirmed final result. It is
+  // used when building the event-attribution experiments cache so that
+  // finalized experiments stop accepting evaluation/goal events.
+  bool exclude_finalized = 16;
 }
 
 message ListExperimentsResponse {
@@ -182,6 +187,15 @@ message UpdateExperimentRequest {
   message UpdatedStatus {
     Experiment.Status status = 1;
   }
+  // ConfirmFinalization is the internal, idempotent confirmation used by the
+  // experiment finalization batch job to move an experiment out of
+  // FINALIZING into its terminal status once the final result has been saved.
+  // The request is rejected unless the stored termination matches
+  // termination_id and the referenced final result has been persisted.
+  message ConfirmFinalization {
+    string termination_id = 1;
+    string final_result_id = 2;
+  }
   string id = 1 [(google.api.field_behavior) = REQUIRED];
   reserved 2;  // ChangeStartAtExperimentCommand change_start_at_command = 2
                // [deprecated = true];
@@ -201,6 +215,7 @@ message UpdateExperimentRequest {
         description: "if true, the experiment will be archived"
       }];
   UpdatedStatus status = 14;
+  ConfirmFinalization confirm_finalization = 17;
 }
 
 message UpdateExperimentResponse {

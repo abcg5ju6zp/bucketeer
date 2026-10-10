@@ -48,6 +48,26 @@ var (
 		"experiment is already stopped",
 		"status",
 	)
+	ErrExperimentFinalizing = pkgErr.NewErrorInvalidArgNotMatchFormat(
+		pkgErr.ExperimentPackageName,
+		"experiment is finalizing, the configuration is fixed",
+		"status",
+	)
+	ErrExperimentNotFinalizing = pkgErr.NewErrorInvalidArgNotMatchFormat(
+		pkgErr.ExperimentPackageName,
+		"experiment is not finalizing",
+		"status",
+	)
+	ErrTerminationIdentityMismatch = pkgErr.NewErrorInvalidArgNotMatchFormat(
+		pkgErr.ExperimentPackageName,
+		"termination identity does not match",
+		"termination_id",
+	)
+	ErrFinalResultIDRequired = pkgErr.NewErrorInvalidArgNotMatchFormat(
+		pkgErr.ExperimentPackageName,
+		"final result id is required",
+		"final_result_id",
+	)
 	ErrExperimentStartIsAfterStop = pkgErr.NewErrorInvalidArgNotMatchFormat(
 		pkgErr.ExperimentPackageName,
 		"start is after stop timestamp",
@@ -145,6 +165,13 @@ func (e *Experiment) Update(
 	status *experimentproto.UpdateExperimentRequest_UpdatedStatus,
 	archived *wrapperspb.BoolValue,
 ) (*Experiment, error) {
+	// While the finalization is in progress the configuration is fixed by the
+	// termination snapshot. Draft updates, archiving and status changes are
+	// rejected; the experiment only leaves FINALIZING through
+	// ConfirmFinalized.
+	if e.Status == experimentproto.Experiment_FINALIZING {
+		return nil, ErrExperimentFinalizing
+	}
 	updated := &Experiment{}
 	err := copier.Copy(&updated, e)
 	if err != nil {
@@ -254,6 +281,74 @@ func (e *Experiment) Stop() error {
 	return nil
 }
 
+// EnterFinalizing moves an active experiment (WAITING or RUNNING) into the
+// FINALIZING state and binds it to the stable termination identity. Both the
+// scheduled stop and an early (manual) stop enter the experiment through this
+// same method, so a repeated stop trigger can never produce a second final
+// result. The configuration snapshot and the event watermarks are fixed by the
+// caller and persisted on the termination record; the experiment row itself is
+// not changed beyond the status and the termination identity.
+func (e *Experiment) EnterFinalizing(terminationID string) error {
+	if terminationID == "" {
+		return ErrTerminationIdentityMismatch
+	}
+	if e.Status != experimentproto.Experiment_WAITING &&
+		e.Status != experimentproto.Experiment_RUNNING {
+		return ErrExperimentStatusInvalid
+	}
+	now := time.Now().Unix()
+	e.Status = experimentproto.Experiment_FINALIZING
+	e.TerminationId = terminationID
+	e.UpdatedAt = now
+	return nil
+}
+
+// CanInitiateFinalization reports whether a stop request (scheduled or forced)
+// is allowed to initiate the finalization right now. When checkStopAt is true
+// the experiment's scheduled stop time must have been reached.
+func (e *Experiment) CanInitiateFinalization(checkStopAt bool, now int64) error {
+	if e.Status != experimentproto.Experiment_WAITING &&
+		e.Status != experimentproto.Experiment_RUNNING {
+		return ErrExperimentStatusInvalid
+	}
+	if checkStopAt && e.StopAt > now {
+		return ErrExperimentBeforeStop
+	}
+	return nil
+}
+
+// ConfirmFinalized is the only transition out of FINALIZING: it binds the
+// terminal status to the confirmed final result referenced by finalResultID.
+// The termination identity must match the one set when finalization started.
+// forced decides between FORCE_STOPPED (early stop) and STOPPED (scheduled
+// stop); both terminal statuses can only ever reference the result that was
+// computed from the fixed termination snapshot.
+func (e *Experiment) ConfirmFinalized(
+	terminationID string,
+	finalResultID string,
+	forced bool,
+) error {
+	if e.Status != experimentproto.Experiment_FINALIZING {
+		return ErrExperimentNotFinalizing
+	}
+	if e.TerminationId == "" || e.TerminationId != terminationID {
+		return ErrTerminationIdentityMismatch
+	}
+	if finalResultID == "" {
+		return ErrFinalResultIDRequired
+	}
+	now := time.Now().Unix()
+	if forced {
+		e.Status = experimentproto.Experiment_FORCE_STOPPED
+	} else {
+		e.Status = experimentproto.Experiment_STOPPED
+	}
+	e.FinalResultId = finalResultID
+	e.StoppedAt = now
+	e.UpdatedAt = now
+	return nil
+}
+
 func (e *Experiment) ChangePeriod(startAt, stopAt int64) error {
 	if err := e.validatePeriod(startAt, stopAt); err != nil {
 		return err
@@ -348,16 +443,21 @@ func SyncGoalIDs(goalID string, goalIDs []string) (string, []string) {
 	return goalID, goalIDs
 }
 
-// IsNotFinished returns true if the status is either waiting or running.
-func (e *Experiment) IsNotFinished(t time.Time) bool {
+// IsNotFinished returns true while the experiment is still in progress:
+// WAITING, RUNNING, or FINALIZING. FINALIZING is deliberately treated as in
+// progress so that the linked feature flag (its variations) cannot be edited
+// after the termination snapshot was taken; the association is only released
+// once the experiment reaches STOPPED/FORCE_STOPPED.
+func (e *Experiment) IsNotFinished(_ time.Time) bool {
 	if e.Deleted {
 		return false
 	}
-	if e.StopAt <= t.Unix() {
+	switch e.Status {
+	case experimentproto.Experiment_WAITING,
+		experimentproto.Experiment_RUNNING,
+		experimentproto.Experiment_FINALIZING:
+		return true
+	default:
 		return false
 	}
-	if e.StoppedAt <= t.Unix() {
-		return false
-	}
-	return true
 }

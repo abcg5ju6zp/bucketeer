@@ -351,6 +351,31 @@ func (s *experimentService) DeleteGoal(
 	if req.Id == "" {
 		return nil, statusGoalIDRequired.Err()
 	}
+	// Once an experiment finalization fixed its goal set in the snapshot,
+	// a referenced goal cannot be deleted until the final result is
+	// confirmed; deleting it earlier would make the final result incomplete.
+	finalizing, _, _, err := s.experimentStorage.ListExperiments(ctx, v2es.ListExperimentsParams{
+		EnvironmentID: req.EnvironmentId,
+		Statuses:      []proto.Experiment_Status{proto.Experiment_FINALIZING},
+	})
+	if err != nil {
+		s.logger.Error(
+			"Failed to list finalizing experiments when deleting goal",
+			log.FieldsFromIncomingContext(ctx).AddFields(
+				zap.Error(err),
+				zap.String("environmentId", req.EnvironmentId),
+				zap.String("goalId", req.Id),
+			)...,
+		)
+		return nil, api.NewGRPCStatus(err).Err()
+	}
+	for _, e := range finalizing {
+		for _, gid := range e.GoalIds {
+			if gid == req.Id {
+				return nil, statusGoalReferencedByFinalizing.Err()
+			}
+		}
+	}
 	err = s.dbClient.RunInTransactionV2(ctx, func(ctxWithTx context.Context) error {
 		goal, err := s.goalStorage.GetGoal(ctxWithTx, req.Id, req.EnvironmentId)
 		if err != nil {

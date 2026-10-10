@@ -392,6 +392,9 @@ func TestDeleteGoalMySQL(t *testing.T) {
 		},
 		{
 			setup: func(s *experimentService) {
+				s.experimentStorage.(*storagemock.MockExperimentStorage).EXPECT().ListExperiments(
+					gomock.Any(), gomock.Any(),
+				).Return([]*experimentproto.Experiment{}, 0, int64(0), nil)
 				s.dbClient.(*dbmock.MockClient).EXPECT().RunInTransactionV2(
 					gomock.Any(), gomock.Any(),
 				).Return(v2es.ErrGoalNotFound)
@@ -404,6 +407,9 @@ func TestDeleteGoalMySQL(t *testing.T) {
 		},
 		{
 			setup: func(s *experimentService) {
+				s.experimentStorage.(*storagemock.MockExperimentStorage).EXPECT().ListExperiments(
+					gomock.Any(), gomock.Any(),
+				).Return([]*experimentproto.Experiment{}, 0, int64(0), nil)
 				s.goalStorage.(*storagemock.MockGoalStorage).EXPECT().GetGoal(
 					gomock.Any(), gomock.Any(), gomock.Any(),
 				).Return(&domain.Goal{

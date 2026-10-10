@@ -38,12 +38,13 @@ const (
 )
 
 type evalEvtWriter struct {
-	writer           dwhstorage.EvalEventWriter
-	experimentClient ec.Client
-	cache            cachev3.ExperimentsCache
-	flightgroup      singleflight.Group
-	location         *time.Location
-	logger           *zap.Logger
+	writer            dwhstorage.EvalEventWriter
+	experimentClient  ec.Client
+	cache             cachev3.ExperimentsCache
+	watermarkRecorder EventWatermarkRecorder
+	flightgroup       singleflight.Group
+	location          *time.Location
+	logger            *zap.Logger
 }
 
 // NewEvalEventWriter wraps an already-initialized data-warehouse evaluation-event writer
@@ -54,13 +55,15 @@ func NewEvalEventWriter(
 	cache cachev3.ExperimentsCache,
 	location *time.Location,
 	evalWriter dwhstorage.EvalEventWriter,
+	watermarkRecorder EventWatermarkRecorder,
 ) Writer {
 	return &evalEvtWriter{
-		writer:           evalWriter,
-		experimentClient: exClient,
-		cache:            cache,
-		location:         location,
-		logger:           l,
+		writer:            evalWriter,
+		experimentClient:  exClient,
+		cache:             cache,
+		watermarkRecorder: watermarkRecorder,
+		location:          location,
+		logger:            l,
 	}
 }
 
@@ -153,6 +156,12 @@ func (w *evalEvtWriter) Write(
 			zap.Any("evaluationEvents", failedToAppendMap),
 		)
 	}
+	// Advance the evaluation-event watermark with the highest timestamp that
+	// was durably persisted in this batch, per environment.
+	for envID, highWater := range highWaterByEnvironment(evalEvents, fails) {
+		recordWatermark(ctx, w.logger, w.watermarkRecorder,
+			envID, watermarkEventTypeEvaluation, highWater)
+	}
 	return fails
 }
 
@@ -239,14 +248,19 @@ func (w *evalEvtWriter) listExperiments(
 				// Because the evaluation and goal events may be sent with a delay
 				// for many reasons from the client side, we still calculate
 				// the results for two days after it stopped.
-				StopAt:        time.Now().In(w.location).Add(-2 * day).Unix(),
-				PageSize:      0,
-				EnvironmentId: environmentId,
+				StopAt:   time.Now().In(w.location).Add(-2 * day).Unix(),
+				PageSize: 0,
+				// FINALIZING experiments keep accepting events until their final
+				// result is confirmed; already-finalized ones are excluded so
+				// their attribution stops.
 				Statuses: []exproto.Experiment_Status{
 					exproto.Experiment_RUNNING,
+					exproto.Experiment_FINALIZING,
 					exproto.Experiment_STOPPED,
 				},
-				Archived: wrapperspb.Bool(false),
+				ExcludeFinalized: true,
+				EnvironmentId:    environmentId,
+				Archived:         wrapperspb.Bool(false),
 			})
 			if err != nil {
 				return nil, err

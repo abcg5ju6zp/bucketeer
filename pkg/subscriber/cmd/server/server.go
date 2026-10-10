@@ -41,6 +41,8 @@ import (
 	ecbigquery "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/dwh_database/bigquery"
 	ecmysql "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/dwh_database/mysql"
 	ecpostgres "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/dwh_database/postgres"
+	operationalmysql "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/operational_database/mysql"
+	operationalpg "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/operational_database/postgres"
 	experimentclient "github.com/bucketeer-io/bucketeer/v2/pkg/experiment/client"
 	featureclient "github.com/bucketeer-io/bucketeer/v2/pkg/feature/client"
 	v2fs "github.com/bucketeer-io/bucketeer/v2/pkg/feature/storage/v2"
@@ -384,6 +386,14 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		autoOpsRuleStorage = opmysql.NewAutoOpsRuleStorage(mysqlClient)
 	}
 
+	// The event watermark storage lives in the operational database.
+	var watermarkRecorder processor.EventWatermarkRecorder
+	if *s.operationalDatabaseType == "postgres" {
+		watermarkRecorder = operationalpg.NewEventWatermarkStorage(postgresClient)
+	} else {
+		watermarkRecorder = operationalmysql.NewEventWatermarkStorage(mysqlClient)
+	}
+
 	creds, err := client.NewPerRPCCredentials(*s.serviceTokenPath)
 	if err != nil {
 		return err
@@ -546,6 +556,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		accountStorage,
 		experimentStorage,
 		autoOpsRuleStorage,
+		watermarkRecorder,
 		persistentRedisClient,
 		nonPersistentRedisClient,
 		experimentClient,
@@ -1074,6 +1085,7 @@ func (s *server) registerPubSubProcessorMap(
 	accountStorage accstorage.AccountStorage,
 	experimentStorage operationalstorage.ExperimentStorage,
 	autoOpsRuleStorage operationalstorage.AutoOpsRuleStorage,
+	watermarkRecorder processor.EventWatermarkRecorder,
 	persistentRedisClient redisv3.Client,
 	nonPersistentRedisClient redisv3.Client,
 	exClient experimentclient.Client,
@@ -1269,6 +1281,7 @@ func (s *server) registerPubSubProcessorMap(
 			persistentRedisClient,    // use persistent redis instance here for goal retry events
 			exClient,
 			ftClient,
+			watermarkRecorder,
 			processor.EvaluationCountEventDWHPersisterName,
 			logger,
 		)
@@ -1295,6 +1308,7 @@ func (s *server) registerPubSubProcessorMap(
 			persistentRedisClient,    // use persistent redis instance here for goal retry events
 			exClient,
 			ftClient,
+			watermarkRecorder,
 			processor.GoalCountEventDWHPersisterName,
 			logger,
 		)

@@ -117,9 +117,14 @@ func (c *experimentCacher) listExperiments(
 		EnvironmentId: environmentID,
 		Statuses: []expproto.Experiment_Status{
 			expproto.Experiment_RUNNING,
+			expproto.Experiment_FINALIZING,
 			expproto.Experiment_STOPPED,
 		},
-		Archived: &wrapperspb.BoolValue{Value: false},
+		// Experiments with a confirmed final result are detached from
+		// event attribution; everything else (including legacy stopped
+		// experiments within the lookback window) keeps being cached.
+		ExcludeFinalized: true,
+		Archived:         wrapperspb.Bool(false),
 	}
 	resp, err := c.experimentClient.ListExperiments(ctx, req)
 	if err != nil {

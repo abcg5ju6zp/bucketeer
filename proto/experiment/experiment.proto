@@ -29,6 +29,12 @@ message Experiment {
     RUNNING = 1;
     STOPPED = 2;
     FORCE_STOPPED = 3;
+    // FINALIZING is the intermediate state between running and stopped.
+    // While finalizing, the experiment configuration and the evaluation/goal
+    // event watermarks are fixed, and the final result is computed once from
+    // that snapshot. The experiment only moves to STOPPED/FORCE_STOPPED after
+    // the confirmed final result has been saved and published.
+    FINALIZING = 4;
   }
   string id = 1;
   string goal_id = 2 [deprecated = true];
@@ -51,6 +57,17 @@ message Experiment {
   string maintainer = 19;
   bool archived = 20;
   repeated GoalReference goals = 21;
+  // termination_id is the stable identity of the finalization process that
+  // moves the experiment to its terminal state. It is set when the experiment
+  // enters FINALIZING and is never changed afterwards. Both the scheduled and
+  // the early (manual) stop share the same termination identity, so repeated
+  // stop triggers never produce a second final result.
+  string termination_id = 22;
+  // final_result_id references the confirmed experiment_result that the
+  // terminal status (STOPPED / FORCE_STOPPED) is bound to. It is empty until
+  // finalization is confirmed; once set, the result is frozen and must never
+  // be recalculated.
+  string final_result_id = 23;
 }
 
 message Experiments {

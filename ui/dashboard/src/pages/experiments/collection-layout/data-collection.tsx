@@ -31,13 +31,15 @@ export const ExperimentStatuses = ({
   status: ExperimentStatus;
 }) => {
   const { t } = useTranslation(['table']);
-  const { isRunning, isWaiting, isStopped } = useMemo(() => {
+  const { isRunning, isWaiting, isFinalizing, isStopped } = useMemo(() => {
     const isRunning = status === 'RUNNING';
     const isWaiting = status === 'WAITING';
+    const isFinalizing = status === 'FINALIZING';
     const isStopped = ['STOPPED', 'FORCE_STOPPED'].includes(status);
     return {
       isRunning,
       isWaiting,
+      isFinalizing,
       isStopped
     };
   }, [status]);
@@ -51,7 +53,7 @@ export const ExperimentStatuses = ({
       className={cn(
         'flex-center w-fit gap-x-1 px-2 py-1.5 typo-para-small rounded whitespace-nowrap capitalize',
         {
-          'bg-primary-50 text-primary-500': isRunning,
+          'bg-primary-50 text-primary-500': isRunning || isFinalizing,
           'bg-accent-orange-50 text-accent-orange-500': isWaiting,
           'bg-accent-red-50 text-accent-red-500': isStopped
         }
@@ -59,7 +61,7 @@ export const ExperimentStatuses = ({
     >
       <Icon
         icon={
-          isRunning
+          isRunning || isFinalizing
             ? IconExperiment
             : isWaiting
               ? IconWaitingExperiment

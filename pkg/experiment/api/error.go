@@ -60,4 +60,16 @@ var (
 		pkgErr.NewErrorUnauthenticated(pkgErr.ExperimentPackageName, "unauthenticated"))
 	statusPermissionDenied = api.NewGRPCStatus(
 		pkgErr.NewErrorPermissionDenied(pkgErr.ExperimentPackageName, "permission denied"))
+	statusExperimentFinalizing = api.NewGRPCStatus(
+		pkgErr.NewErrorFailedPrecondition(pkgErr.ExperimentPackageName,
+			"experiment is finalizing, the configuration is fixed"))
+	statusTerminationMismatch = api.NewGRPCStatus(
+		pkgErr.NewErrorInvalidArgNotMatchFormat(pkgErr.ExperimentPackageName,
+			"termination identity or final result does not match", "termination"))
+	statusTerminationNotFound = api.NewGRPCStatus(
+		pkgErr.NewErrorFailedPrecondition(pkgErr.ExperimentPackageName,
+			"experiment termination is not in progress"))
+	statusGoalReferencedByFinalizing = api.NewGRPCStatus(
+		pkgErr.NewErrorFailedPrecondition(pkgErr.ExperimentPackageName,
+			"goal is referenced by an experiment that is finalizing"))
 )

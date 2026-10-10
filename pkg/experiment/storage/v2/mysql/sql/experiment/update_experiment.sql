@@ -18,7 +18,9 @@ SET
     description = ?,
     base_variation_id = ?,
     maintainer = ?,
-    status = ?
+    status = ?,
+    termination_id = ?,
+    final_result_id = ?
 WHERE
     id = ? AND
     environment_id = ?

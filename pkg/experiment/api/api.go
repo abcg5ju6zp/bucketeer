@@ -47,15 +47,16 @@ func WithLogger(l *zap.Logger) Option {
 }
 
 type experimentService struct {
-	featureClient     featureclient.Client
-	accountClient     accountclient.Client
-	autoOpsClient     autoopsclient.Client
-	dbClient          database.Client
-	experimentStorage storage.ExperimentStorage
-	goalStorage       storage.GoalStorage
-	publisher         publisher.Publisher
-	opts              *options
-	logger            *zap.Logger
+	featureClient       featureclient.Client
+	accountClient       accountclient.Client
+	autoOpsClient       autoopsclient.Client
+	dbClient            database.Client
+	experimentStorage   storage.ExperimentStorage
+	terminationStorage  storage.TerminationStorage
+	goalStorage         storage.GoalStorage
+	publisher           publisher.Publisher
+	opts                *options
+	logger              *zap.Logger
 }
 
 func NewExperimentService(
@@ -64,6 +65,7 @@ func NewExperimentService(
 	autoOpsClient autoopsclient.Client,
 	dbClient database.Client,
 	experimentStorage storage.ExperimentStorage,
+	terminationStorage storage.TerminationStorage,
 	goalStorage storage.GoalStorage,
 	publisher publisher.Publisher,
 	opts ...Option,
@@ -75,15 +77,16 @@ func NewExperimentService(
 		opt(dopts)
 	}
 	return &experimentService{
-		featureClient:     featureClient,
-		accountClient:     accountClient,
-		autoOpsClient:     autoOpsClient,
-		dbClient:          dbClient,
-		experimentStorage: experimentStorage,
-		goalStorage:       goalStorage,
-		publisher:         publisher,
-		opts:              dopts,
-		logger:            dopts.logger.Named("api"),
+		featureClient:      featureClient,
+		accountClient:      accountClient,
+		autoOpsClient:      autoOpsClient,
+		dbClient:           dbClient,
+		experimentStorage:  experimentStorage,
+		terminationStorage: terminationStorage,
+		goalStorage:        goalStorage,
+		publisher:          publisher,
+		opts:               dopts,
+		logger:             dopts.logger.Named("api"),
 	}
 }
 

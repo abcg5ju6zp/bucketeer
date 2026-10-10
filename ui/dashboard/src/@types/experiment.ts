@@ -1,7 +1,12 @@
 import { FeatureVariation } from './feature';
 
 export type ExperimentStatus =
-  'WAITING' | 'RUNNING' | 'STOPPED' | 'FORCE_STOPPED' | 'NOT_STARTED';
+  | 'WAITING'
+  | 'RUNNING'
+  | 'STOPPED'
+  | 'FORCE_STOPPED'
+  | 'FINALIZING'
+  | 'NOT_STARTED';
 
 export interface Experiment {
   id: string;

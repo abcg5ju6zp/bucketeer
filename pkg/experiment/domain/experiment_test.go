@@ -15,7 +15,6 @@
 package domain
 
 import (
-	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -451,12 +450,12 @@ func TestIsNotFinished(t *testing.T) {
 		expected   bool
 	}{
 		{
-			desc: "before StartAt",
+			desc: "waiting",
 			experiment: &Experiment{Experiment: &experimentproto.Experiment{
-				Deleted:   false,
-				StartAt:   t2.Unix(),
-				StopAt:    t3.Unix(),
-				StoppedAt: math.MaxInt64,
+				Deleted: false,
+				Status:  experimentproto.Experiment_WAITING,
+				StartAt: t2.Unix(),
+				StopAt:  t3.Unix(),
 			}},
 			input:    t1,
 			expected: true,
@@ -464,29 +463,54 @@ func TestIsNotFinished(t *testing.T) {
 		{
 			desc: "running",
 			experiment: &Experiment{Experiment: &experimentproto.Experiment{
-				Deleted:   false,
-				StartAt:   t1.Unix(),
-				StopAt:    t3.Unix(),
-				StoppedAt: math.MaxInt64,
+				Deleted: false,
+				Status:  experimentproto.Experiment_RUNNING,
+				StartAt: t1.Unix(),
+				StopAt:  t3.Unix(),
 			}},
 			input:    t2,
 			expected: true,
 		},
 		{
-			desc: "after StoppedAt, before StoppAt",
+			desc: "running past the scheduled stop time is still in progress",
 			experiment: &Experiment{Experiment: &experimentproto.Experiment{
-				Deleted:   false,
-				StartAt:   t1.Unix(),
-				StopAt:    t4.Unix(),
-				StoppedAt: t2.Unix(),
+				Deleted: false,
+				Status:  experimentproto.Experiment_RUNNING,
+				StartAt: t1.Unix(),
+				StopAt:  t2.Unix(),
 			}},
 			input:    t3,
+			expected: true,
+		},
+		{
+			desc: "finalizing keeps the feature association locked",
+			experiment: &Experiment{Experiment: &experimentproto.Experiment{
+				Deleted:       false,
+				Status:        experimentproto.Experiment_FINALIZING,
+				StartAt:       t1.Unix(),
+				StopAt:        t2.Unix(),
+				TerminationId: "termination-id",
+			}},
+			input:    t3,
+			expected: true,
+		},
+		{
+			desc: "stopped",
+			experiment: &Experiment{Experiment: &experimentproto.Experiment{
+				Deleted:   false,
+				Status:    experimentproto.Experiment_STOPPED,
+				StartAt:   t1.Unix(),
+				StopAt:    t3.Unix(),
+				StoppedAt: t3.Unix(),
+			}},
+			input:    t4,
 			expected: false,
 		},
 		{
-			desc: "after StopAt and StoppedAt",
+			desc: "force stopped",
 			experiment: &Experiment{Experiment: &experimentproto.Experiment{
 				Deleted:   false,
+				Status:    experimentproto.Experiment_FORCE_STOPPED,
 				StartAt:   t1.Unix(),
 				StopAt:    t3.Unix(),
 				StoppedAt: t2.Unix(),
@@ -497,10 +521,10 @@ func TestIsNotFinished(t *testing.T) {
 		{
 			desc: "Deleted",
 			experiment: &Experiment{Experiment: &experimentproto.Experiment{
-				Deleted:   true,
-				StartAt:   t1.Unix(),
-				StopAt:    t3.Unix(),
-				StoppedAt: math.MaxInt64,
+				Deleted: true,
+				Status:  experimentproto.Experiment_RUNNING,
+				StartAt: t1.Unix(),
+				StopAt:  t3.Unix(),
 			}},
 			input:    t2,
 			expected: false,
@@ -748,6 +772,156 @@ func TestUpdateExperiment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEnterFinalizing(t *testing.T) {
+	t.Parallel()
+	terminationID := "termination-id"
+	patterns := []struct {
+		desc        string
+		status      experimentproto.Experiment_Status
+		id          string
+		expectedErr error
+	}{
+		{
+			desc:        "success from running",
+			status:      experimentproto.Experiment_RUNNING,
+			id:          terminationID,
+			expectedErr: nil,
+		},
+		{
+			desc:        "success from waiting",
+			status:      experimentproto.Experiment_WAITING,
+			id:          terminationID,
+			expectedErr: nil,
+		},
+		{
+			desc:        "error from stopped",
+			status:      experimentproto.Experiment_STOPPED,
+			id:          terminationID,
+			expectedErr: ErrExperimentStatusInvalid,
+		},
+		{
+			desc:        "error from finalizing",
+			status:      experimentproto.Experiment_FINALIZING,
+			id:          terminationID,
+			expectedErr: ErrExperimentStatusInvalid,
+		},
+		{
+			desc:        "error empty termination id",
+			status:      experimentproto.Experiment_RUNNING,
+			id:          "",
+			expectedErr: ErrTerminationIdentityMismatch,
+		},
+	}
+	for _, p := range patterns {
+		t.Run(p.desc, func(t *testing.T) {
+			e := &Experiment{Experiment: &experimentproto.Experiment{
+				Id:     "eID",
+				Status: p.status,
+			}}
+			err := e.EnterFinalizing(p.id)
+			if p.expectedErr != nil {
+				assert.Equal(t, p.expectedErr, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, experimentproto.Experiment_FINALIZING, e.Status)
+			assert.Equal(t, p.id, e.TerminationId)
+		})
+	}
+}
+
+func TestConfirmFinalized(t *testing.T) {
+	t.Parallel()
+	patterns := []struct {
+		desc           string
+		status         experimentproto.Experiment_Status
+		terminationID  string
+		finalResultID  string
+		forced         bool
+		expectedStatus experimentproto.Experiment_Status
+		expectedErr    error
+	}{
+		{
+			desc:           "scheduled stop ends in stopped",
+			status:         experimentproto.Experiment_FINALIZING,
+			terminationID:  "tid",
+			finalResultID:  "rid",
+			forced:         false,
+			expectedStatus: experimentproto.Experiment_STOPPED,
+			expectedErr:    nil,
+		},
+		{
+			desc:           "early stop ends in force stopped",
+			status:         experimentproto.Experiment_FINALIZING,
+			terminationID:  "tid",
+			finalResultID:  "rid",
+			forced:         true,
+			expectedStatus: experimentproto.Experiment_FORCE_STOPPED,
+			expectedErr:    nil,
+		},
+		{
+			desc:          "error not finalizing",
+			status:        experimentproto.Experiment_RUNNING,
+			terminationID: "tid",
+			finalResultID: "rid",
+			expectedErr:   ErrExperimentNotFinalizing,
+		},
+		{
+			desc:          "error termination identity mismatch",
+			status:        experimentproto.Experiment_FINALIZING,
+			terminationID: "another",
+			finalResultID: "rid",
+			expectedErr:   ErrTerminationIdentityMismatch,
+		},
+		{
+			desc:          "error empty final result id",
+			status:        experimentproto.Experiment_FINALIZING,
+			terminationID: "tid",
+			finalResultID: "",
+			expectedErr:   ErrFinalResultIDRequired,
+		},
+	}
+	for _, p := range patterns {
+		t.Run(p.desc, func(t *testing.T) {
+			e := &Experiment{Experiment: &experimentproto.Experiment{
+				Id:            "eID",
+				Status:        p.status,
+				TerminationId: "tid",
+			}}
+			err := e.ConfirmFinalized(p.terminationID, p.finalResultID, p.forced)
+			if p.expectedErr != nil {
+				assert.Equal(t, p.expectedErr, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, p.expectedStatus, e.Status)
+			assert.Equal(t, p.finalResultID, e.FinalResultId)
+			assert.InDelta(t, time.Now().Unix(), e.StoppedAt, 5)
+		})
+	}
+}
+
+func TestUpdateWhileFinalizingRejected(t *testing.T) {
+	t.Parallel()
+	e := &Experiment{Experiment: &experimentproto.Experiment{
+		Id:            "eID",
+		Status:        experimentproto.Experiment_FINALIZING,
+		TerminationId: "tid",
+	}}
+	_, err := e.Update(
+		wrapperspb.String("newName"),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	assert.Equal(t, ErrExperimentFinalizing, err)
+	// archiving is rejected as well
+	_, err = e.Update(nil, nil, nil, nil, nil, wrapperspb.Bool(true))
+	assert.Equal(t, ErrExperimentFinalizing, err)
 }
 
 func newExperiment(t *testing.T) *Experiment {

@@ -44,6 +44,7 @@ enum BatchJob {
   FeatureAutoArchiver = 19;
   ScheduledFlagChangeExecutor = 20;
   MonthlySummarizer = 21;
+  ExperimentFinalizer = 22;
 }
 
 message BatchJobRequest {

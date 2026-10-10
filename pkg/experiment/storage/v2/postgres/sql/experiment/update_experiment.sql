@@ -18,7 +18,9 @@ SET
     description = $15,
     base_variation_id = $16,
     maintainer = $17,
-    status = $18
+    status = $18,
+    termination_id = $19,
+    final_result_id = $20
 WHERE
-    id = $19 AND
-    environment_id = $20
+    id = $21 AND
+    environment_id = $22

@@ -497,9 +497,13 @@ func (c *cacheRefresher) refreshExperiments(
 		StopAt:        time.Now().Add(-experimentRefreshLookback).Unix(),
 		Statuses: []experimentproto.Experiment_Status{
 			experimentproto.Experiment_RUNNING,
+			experimentproto.Experiment_FINALIZING,
 			experimentproto.Experiment_STOPPED,
 		},
-		Archived: &wrapperspb.BoolValue{Value: false},
+		// Drop experiments whose final result is already confirmed so the
+		// cache state matches the post-finalization attribution set.
+		ExcludeFinalized: true,
+		Archived:         &wrapperspb.BoolValue{Value: false},
 	})
 	if err != nil {
 		return err

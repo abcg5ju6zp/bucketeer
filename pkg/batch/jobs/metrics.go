@@ -51,6 +51,7 @@ const (
 	JobFeatureAutoArchiver         = "feature_auto_archiver"
 	JobScheduledFlagChangeExecutor = "scheduled_flag_change_executor"
 	JobMonthlySummarizer           = "monthly_summarizer"
+	JobExperimentFinalizer         = "experiment_finalizer"
 
 	// Error types
 	ErrorTypeTimeout    = "Timeout"

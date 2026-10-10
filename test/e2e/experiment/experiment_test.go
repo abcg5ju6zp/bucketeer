@@ -518,15 +518,26 @@ func TestStatusUpdateFromWaitingToRunningAndForceStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to update experiment status: %v", err)
 	}
-	resp, err = c.GetExperiment(ctx, &experimentproto.GetExperimentRequest{
-		Id:            expected.Id,
-		EnvironmentId: *environmentID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Experiment.Status != experimentproto.Experiment_FORCE_STOPPED {
-		t.Fatalf("Experiment status is not force stopped. actual: %d", resp.Experiment.Status)
+	// The early stop initiates a finalization: the experiment enters
+	// FINALIZING and reaches FORCE_STOPPED only once the finalizer has
+	// confirmed the final result. Poll until the terminal status appears.
+	var status experimentproto.Experiment_Status
+	for i := 0; i < retryTimes*6; i++ {
+		resp, err = c.GetExperiment(ctx, &experimentproto.GetExperimentRequest{
+			Id:            expected.Id,
+			EnvironmentId: *environmentID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status = resp.Experiment.Status
+		if status == experimentproto.Experiment_FORCE_STOPPED {
+			break
+		}
+		if i == retryTimes*6-1 {
+			t.Fatalf("Experiment did not reach force stopped. actual: %d", status)
+		}
+		time.Sleep(time.Second)
 	}
 	stopExperiment(ctx, t, c, expected.Id)
 }

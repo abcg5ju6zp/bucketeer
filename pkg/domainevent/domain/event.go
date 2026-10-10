@@ -26,17 +26,40 @@ import (
 	"github.com/bucketeer-io/bucketeer/v2/proto/event/domain"
 )
 
-type Option func(*domain.Options)
+type Option func(*domain.Event)
 
 func WithComment(c string) Option {
-	return func(opts *domain.Options) {
-		opts.Comment = c
+	return func(e *domain.Event) {
+		e.Options.Comment = c
 	}
 }
 
 func WithNewVersion(ver int32) Option {
-	return func(opts *domain.Options) {
-		opts.NewVersion = ver
+	return func(e *domain.Event) {
+		e.Options.NewVersion = ver
+	}
+}
+
+// WithEventID sets a pre-generated stable event id. This is used when the
+// event id must equal a change id created before the event is constructed.
+func WithEventID(id string) Option {
+	return func(e *domain.Event) {
+		e.Id = id
+	}
+}
+
+// WithChangeIdentity attaches the stable change identity to the event: its
+// sequence within the environment and the entity versions before and after
+// the change. NewVersion is set to the after-version as well.
+func WithChangeIdentity(sequence, beforeVersion, afterVersion int64) Option {
+	return func(e *domain.Event) {
+		if e.Options == nil {
+			e.Options = &domain.Options{}
+		}
+		e.Options.Sequence = sequence
+		e.Options.BeforeVersion = beforeVersion
+		e.Options.AfterVersion = afterVersion
+		e.Options.NewVersion = int32(afterVersion)
 	}
 }
 
@@ -86,13 +109,6 @@ func newEvent(
 	entity, previousEntity interface{},
 	opts ...Option,
 ) (*domain.Event, error) {
-	options := domain.Options{
-		Comment:    "",
-		NewVersion: 1,
-	}
-	for _, opt := range opts {
-		opt(&options)
-	}
 	buf, err := anypb.New(event)
 	if err != nil {
 		return nil, err
@@ -114,7 +130,7 @@ func newEvent(
 			return nil, err
 		}
 	}
-	return &domain.Event{
+	e := &domain.Event{
 		Id:                 id.String(),
 		Timestamp:          time.Now().Unix(),
 		EntityType:         entityType,
@@ -127,6 +143,13 @@ func newEvent(
 		IsAdminEvent:       isAdminEvent,
 		EntityData:         string(entityData),
 		PreviousEntityData: string(prevEntityData),
-		Options:            &options,
-	}, nil
+		Options: &domain.Options{
+			Comment:    "",
+			NewVersion: 1,
+		},
+	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e, nil
 }

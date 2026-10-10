@@ -11,7 +11,9 @@ SET
     repository_type = $9,
     repository_branch = $10,
     commit_hash = $11,
-    updated_at = $12
+    updated_at = $12,
+    version = $13
 WHERE
-    id = $13
-    AND environment_id = $14
+    id = $14
+    AND environment_id = $15
+    AND version = $16

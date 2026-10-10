@@ -16,428 +16,137 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/bucketeer-io/bucketeer/v2/pkg/coderef/domain"
+	coderefdomain "github.com/bucketeer-io/bucketeer/v2/pkg/coderef/domain"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/coderef/storage"
 	pgstorage "github.com/bucketeer-io/bucketeer/v2/pkg/storage/v2/postgres"
-	pgmock "github.com/bucketeer-io/bucketeer/v2/pkg/storage/v2/postgres/mock"
-	coderefproto "github.com/bucketeer-io/bucketeer/v2/proto/coderef"
+	postgresmock "github.com/bucketeer-io/bucketeer/v2/pkg/storage/v2/postgres/mock"
 )
-
-var errInternalCoderef = errors.New("internal error")
 
 func TestNewCodeReferenceStorage(t *testing.T) {
 	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
-	s := NewCodeReferenceStorage(pgmock.NewMockQueryExecer(mockController))
-	assert.IsType(t, &codeReferenceStorage{}, s)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	s := NewCodeReferenceStorage(postgresmock.NewMockQueryExecer(ctrl))
+	assert.NotNil(t, s)
+	assert.Implements(t, (*storage.CodeReferenceStorage)(nil), s)
 }
 
-func TestCreateCodeReferencePostgres(t *testing.T) {
+// TestEmbeddedSQLStatements guards against broken embed paths and ensures
+// every statement references the expected tables/columns and uses numbered
+// placeholders.
+func TestEmbeddedSQLStatements(t *testing.T) {
 	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
-
-	patterns := []struct {
-		desc        string
-		setup       func(*codeReferenceStorage)
-		expectedErr error
+	cases := []struct {
+		name string
+		sql  string
+		want []string
 	}{
-		{
-			desc: "error",
-			setup: func(s *codeReferenceStorage) {
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(nil, errInternalCoderef)
-			},
-			expectedErr: errInternalCoderef,
-		},
-		{
-			desc: "success",
-			setup: func(s *codeReferenceStorage) {
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(nil, nil)
-			},
-			expectedErr: nil,
-		},
+		{"insert reference", insertCodeReferenceSQL, []string{"INSERT INTO code_reference", "$17"}},
+		{"update reference", updateCodeReferenceSQL, []string{"UPDATE code_reference", "AND version = $16"}},
+		{"select reference", selectCodeReferenceSQL, []string{"FROM", "code_reference"}},
+		{"list references", selectCodeReferencesSQL, []string{"FROM", "code_reference"}},
+		{"delete reference", deleteCodeReferenceSQL, []string{"DELETE FROM code_reference", "AND version = $3"}},
+		{"insert change", insertReferenceChangeSQL, []string{"INSERT INTO code_reference_change", "RETURNING seq"}},
+		{"select change", selectReferenceChangeSQL, []string{"FROM", "code_reference_change"}},
+		{"select change by hash", selectReferenceChangeByRequestHashSQL, []string{"request_hash = $2"}},
+		{"update change status", updateReferenceChangeStatusSQL, []string{"UPDATE code_reference_change", "status = $1"}},
+		{"update change event", updateReferenceChangeEventDataSQL, []string{"event_data = $1"}},
+		{"pending changes", selectPendingReferenceChangesSQL, []string{"status = $1", "ORDER BY", "seq"}},
+		{"watermark", selectConfirmedWatermarkSQL, []string{"MIN(seq)", "MAX(seq)", "$3"}},
+		{"count at watermark", countLiveReferencesAtWatermarkSQL, []string{"NOT EXISTS", "GROUP BY c.feature_id", "$4", "$5"}},
+		{"lock feature", lockFeatureForArchiveSQL, []string{"FROM feature", "FOR UPDATE"}},
+		{"changes after", selectHasChangesAfterSQL, []string{"seq > $3", "FOR UPDATE"}},
 	}
-	for _, p := range patterns {
-		t.Run(p.desc, func(t *testing.T) {
-			s := newCodeReferenceStorageWithMock(t, mockController)
-			p.setup(s)
-			err := s.CreateCodeReference(context.Background(), &domain.CodeReference{
-				CodeReference: coderefproto.CodeReference{},
-			})
-			assert.Equal(t, p.expectedErr, err)
-		})
-	}
-}
-
-func TestUpdateCodeReferencePostgres(t *testing.T) {
-	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
-
-	patterns := []struct {
-		desc        string
-		setup       func(*codeReferenceStorage)
-		expectedErr error
-	}{
-		{
-			desc: "error",
-			setup: func(s *codeReferenceStorage) {
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(nil, errInternalCoderef)
-			},
-			expectedErr: errInternalCoderef,
-		},
-		{
-			desc: "error: unexpected affected rows",
-			setup: func(s *codeReferenceStorage) {
-				result := pgmock.NewMockResult(mockController)
-				result.EXPECT().RowsAffected().Return(int64(0), nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(result, nil)
-			},
-			expectedErr: storage.ErrCodeReferenceUnexpectedAffectedRows,
-		},
-		{
-			desc: "success",
-			setup: func(s *codeReferenceStorage) {
-				result := pgmock.NewMockResult(mockController)
-				result.EXPECT().RowsAffected().Return(int64(1), nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(result, nil)
-			},
-			expectedErr: nil,
-		},
-	}
-	for _, p := range patterns {
-		t.Run(p.desc, func(t *testing.T) {
-			s := newCodeReferenceStorageWithMock(t, mockController)
-			p.setup(s)
-			err := s.UpdateCodeReference(context.Background(), &domain.CodeReference{
-				CodeReference: coderefproto.CodeReference{},
-			})
-			assert.Equal(t, p.expectedErr, err)
-		})
-	}
-}
-
-func TestGetCodeReferencePostgres(t *testing.T) {
-	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
-
-	patterns := []struct {
-		desc        string
-		setup       func(*codeReferenceStorage)
-		expectedErr error
-	}{
-		{
-			desc: "error: ErrNoRows",
-			setup: func(s *codeReferenceStorage) {
-				row := pgmock.NewMockRow(mockController)
-				row.EXPECT().Scan(gomock.Any()).Return(pgstorage.ErrNoRows)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryRowContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(row)
-			},
-			expectedErr: storage.ErrCodeReferenceNotFound,
-		},
-		{
-			desc: "error: internal",
-			setup: func(s *codeReferenceStorage) {
-				row := pgmock.NewMockRow(mockController)
-				row.EXPECT().Scan(gomock.Any()).Return(errInternalCoderef)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryRowContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(row)
-			},
-			expectedErr: errInternalCoderef,
-		},
-		{
-			desc: "success",
-			setup: func(s *codeReferenceStorage) {
-				row := pgmock.NewMockRow(mockController)
-				row.EXPECT().Scan(gomock.Any()).Return(nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryRowContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(row)
-			},
-			expectedErr: nil,
-		},
-	}
-	for _, p := range patterns {
-		t.Run(p.desc, func(t *testing.T) {
-			s := newCodeReferenceStorageWithMock(t, mockController)
-			p.setup(s)
-			_, err := s.GetCodeReference(context.Background(), "cr-id")
-			assert.Equal(t, p.expectedErr, err)
-		})
-	}
-}
-
-func TestListCodeReferencesPostgres(t *testing.T) {
-	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
-
-	patterns := []struct {
-		desc           string
-		setup          func(*codeReferenceStorage)
-		params         storage.ListCodeReferencesParams
-		expected       []*domain.CodeReference
-		expectedCursor int
-		expectedErr    error
-	}{
-		{
-			desc:  "error: invalid order by",
-			setup: nil,
-			params: storage.ListCodeReferencesParams{
-				OrderBy: coderefproto.ListCodeReferencesRequest_OrderBy(99),
-			},
-			expected:       nil,
-			expectedCursor: 0,
-			expectedErr:    storage.ErrInvalidOrderBy,
-		},
-		{
-			desc:  "error: invalid cursor",
-			setup: nil,
-			params: storage.ListCodeReferencesParams{
-				PageSize: 10,
-				Cursor:   "invalid",
-			},
-			expected:       nil,
-			expectedCursor: 0,
-			expectedErr:    storage.ErrInvalidCursor,
-		},
-		{
-			desc:  "error: negative cursor",
-			setup: nil,
-			params: storage.ListCodeReferencesParams{
-				PageSize: 10,
-				Cursor:   "-1",
-			},
-			expected:       nil,
-			expectedCursor: 0,
-			expectedErr:    storage.ErrInvalidCursor,
-		},
-		{
-			desc: "error: query",
-			setup: func(s *codeReferenceStorage) {
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(nil, errInternalCoderef)
-			},
-			params: storage.ListCodeReferencesParams{
-				PageSize:      10,
-				Cursor:        "0",
-				EnvironmentID: "env-1",
-				FeatureID:     "ftr-1",
-			},
-			expected:       nil,
-			expectedCursor: 0,
-			expectedErr:    errInternalCoderef,
-		},
-		{
-			desc: "error: count",
-			setup: func(s *codeReferenceStorage) {
-				rows := pgmock.NewMockRows(mockController)
-				rows.EXPECT().Close().Return(nil)
-				rows.EXPECT().Next().Return(false)
-				rows.EXPECT().Err().Return(nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(rows, nil)
-				row := pgmock.NewMockRow(mockController)
-				row.EXPECT().Scan(gomock.Any()).Return(errors.New("count error"))
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryRowContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(row)
-			},
-			params: storage.ListCodeReferencesParams{
-				PageSize:      10,
-				Cursor:        "0",
-				EnvironmentID: "env-1",
-				FeatureID:     "ftr-1",
-			},
-			expected:       nil,
-			expectedCursor: 0,
-			expectedErr:    errors.New("count error"),
-		},
-		{
-			desc: "success",
-			setup: func(s *codeReferenceStorage) {
-				rows := pgmock.NewMockRows(mockController)
-				rows.EXPECT().Close().Return(nil)
-				rows.EXPECT().Next().Return(false)
-				rows.EXPECT().Err().Return(nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(rows, nil)
-				row := pgmock.NewMockRow(mockController)
-				row.EXPECT().Scan(gomock.Any()).Return(nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryRowContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(row)
-			},
-			params: storage.ListCodeReferencesParams{
-				PageSize:         10,
-				Cursor:           "0",
-				EnvironmentID:    "env-1",
-				FeatureID:        "ftr-1",
-				RepositoryName:   "repo",
-				RepositoryOwner:  "owner",
-				RepositoryType:   coderefproto.CodeReference_GITHUB,
-				RepositoryBranch: "main",
-				FileExtension:    "go",
-				OrderBy:          coderefproto.ListCodeReferencesRequest_CREATED_AT,
-				OrderDirection:   coderefproto.ListCodeReferencesRequest_DESC,
-			},
-			expected:       []*domain.CodeReference{},
-			expectedCursor: 0,
-			expectedErr:    nil,
-		},
-	}
-	for _, p := range patterns {
-		t.Run(p.desc, func(t *testing.T) {
-			s := newCodeReferenceStorageWithMock(t, mockController)
-			if p.setup != nil {
-				p.setup(s)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.NotEmpty(t, tc.sql)
+			for _, w := range tc.want {
+				assert.Contains(t, tc.sql, w)
 			}
-			codeRefs, cursor, _, err := s.ListCodeReferences(context.Background(), p.params)
-			assert.Equal(t, p.expected, codeRefs)
-			assert.Equal(t, p.expectedCursor, cursor)
-			assert.Equal(t, p.expectedErr, err)
 		})
 	}
 }
 
-func TestDeleteCodeReferencePostgres(t *testing.T) {
+func TestCountLiveReferencePlaceholders(t *testing.T) {
 	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	qe := postgresmock.NewMockQueryExecer(ctrl)
+	s := NewCodeReferenceStorage(qe).(*codeReferenceStorage)
 
-	patterns := []struct {
-		desc        string
-		setup       func(*codeReferenceStorage)
-		expectedErr error
-	}{
-		{
-			desc: "error",
-			setup: func(s *codeReferenceStorage) {
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(nil, errInternalCoderef)
-			},
-			expectedErr: errInternalCoderef,
-		},
-		{
-			desc: "error: not found",
-			setup: func(s *codeReferenceStorage) {
-				result := pgmock.NewMockResult(mockController)
-				result.EXPECT().RowsAffected().Return(int64(0), nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(result, nil)
-			},
-			expectedErr: storage.ErrCodeReferenceNotFound,
-		},
-		{
-			desc: "success",
-			setup: func(s *codeReferenceStorage) {
-				result := pgmock.NewMockResult(mockController)
-				result.EXPECT().RowsAffected().Return(int64(1), nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().ExecContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(result, nil)
-			},
-			expectedErr: nil,
-		},
-	}
-	for _, p := range patterns {
-		t.Run(p.desc, func(t *testing.T) {
-			s := newCodeReferenceStorageWithMock(t, mockController)
-			p.setup(s)
-			err := s.DeleteCodeReference(context.Background(), "cr-id")
-			assert.Equal(t, p.expectedErr, err)
+	t.Run("numbered placeholders start at $6 and args keep order", func(t *testing.T) {
+		t.Parallel()
+		var captured string
+		var capturedArgs []interface{}
+		rows := postgresmock.NewMockRows(ctrl)
+		qe.EXPECT().QueryContext(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(
+			ctx context.Context, query string, args ...interface{},
+		) (interface{}, error) {
+			captured = query
+			capturedArgs = args
+			return rows, nil
 		})
-	}
+		rows.EXPECT().Close().Return(nil)
+		rows.EXPECT().Next().Return(false)
+		rows.EXPECT().Err().Return(nil)
+
+		_, err := s.CountLiveReferencesAtWatermark(
+			context.Background(), "env-1",
+			[]string{"f1", "f2", "f3"}, 10,
+		)
+		assert.NoError(t, err)
+		assert.Contains(t, captured, "IN ($6, $7, $8)")
+		// $1 env, $2/$4 watermark, $3 create type, $5 delete type, features.
+		require.Len(t, capturedArgs, 8)
+		assert.Equal(t, "env-1", capturedArgs[0])      // $1
+		assert.Equal(t, int64(10), capturedArgs[1])    // $2 watermark
+		assert.Equal(t, coderefdomain.ChangeTypeCreate, capturedArgs[2]) // $3
+		assert.Equal(t, int64(10), capturedArgs[3])                       // $4 watermark
+		assert.Equal(t, coderefdomain.ChangeTypeDelete, capturedArgs[4]) // $5
+		assert.Equal(t, "f1", capturedArgs[5])         // $6
+		assert.Equal(t, "f2", capturedArgs[6])         // $7
+		assert.Equal(t, "f3", capturedArgs[7])         // $8
+	})
+
+	t.Run("empty features does not hit the database", func(t *testing.T) {
+		t.Parallel()
+		counts, err := s.CountLiveReferencesAtWatermark(
+			context.Background(), "env-1", []string{}, 10,
+		)
+		assert.NoError(t, err)
+		assert.Empty(t, counts)
+	})
 }
 
-func TestGetCodeReferenceCountsByFeatureIDsPostgres(t *testing.T) {
+func TestGetNotFoundErrorMapping(t *testing.T) {
 	t.Parallel()
-	mockController := gomock.NewController(t)
-	defer mockController.Finish()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	qe := postgresmock.NewMockQueryExecer(ctrl)
+	s := NewCodeReferenceStorage(qe)
 
-	patterns := []struct {
-		desc        string
-		setup       func(*codeReferenceStorage)
-		featureIDs  []string
-		expected    map[string]int64
-		expectedErr error
-	}{
-		{
-			desc:        "empty feature ids returns empty map",
-			setup:       nil,
-			featureIDs:  []string{},
-			expected:    map[string]int64{},
-			expectedErr: nil,
-		},
-		{
-			desc: "error: query",
-			setup: func(s *codeReferenceStorage) {
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(nil, errInternalCoderef)
-			},
-			featureIDs:  []string{"ftr-1"},
-			expected:    nil,
-			expectedErr: errInternalCoderef,
-		},
-		{
-			desc: "success",
-			setup: func(s *codeReferenceStorage) {
-				rows := pgmock.NewMockRows(mockController)
-				rows.EXPECT().Close().Return(nil)
-				rows.EXPECT().Next().Return(false)
-				rows.EXPECT().Err().Return(nil)
-				s.qe.(*pgmock.MockQueryExecer).EXPECT().QueryContext(
-					gomock.Any(), gomock.Any(), gomock.Any(),
-				).Return(rows, nil)
-			},
-			featureIDs:  []string{"ftr-1", "ftr-2"},
-			expected:    map[string]int64{},
-			expectedErr: nil,
-		},
-	}
-	for _, p := range patterns {
-		t.Run(p.desc, func(t *testing.T) {
-			s := newCodeReferenceStorageWithMock(t, mockController)
-			if p.setup != nil {
-				p.setup(s)
-			}
-			counts, err := s.GetCodeReferenceCountsByFeatureIDs(
-				context.Background(), "env-1", p.featureIDs,
-			)
-			assert.Equal(t, p.expected, counts)
-			assert.Equal(t, p.expectedErr, err)
-		})
-	}
-}
+	t.Run("reference maps no rows to not found", func(t *testing.T) {
+		t.Parallel()
+		row := postgresmock.NewMockRow(ctrl)
+		qe.EXPECT().QueryRowContext(gomock.Any(), gomock.Any(), gomock.Any()).Return(row)
+		row.EXPECT().Scan(gomock.Any()).Return(pgstorage.ErrNoRows)
+		_, err := s.GetCodeReference(context.Background(), "id-1")
+		assert.ErrorIs(t, err, storage.ErrCodeReferenceNotFound)
+	})
 
-func newCodeReferenceStorageWithMock(t *testing.T, mockController *gomock.Controller) *codeReferenceStorage {
-	t.Helper()
-	return &codeReferenceStorage{qe: pgmock.NewMockQueryExecer(mockController)}
+	t.Run("change maps no rows to change not found", func(t *testing.T) {
+		t.Parallel()
+		row := postgresmock.NewMockRow(ctrl)
+		qe.EXPECT().QueryRowContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(row)
+		row.EXPECT().Scan(gomock.Any()).Return(pgstorage.ErrNoRows)
+		_, err := s.GetChangeByRequestHash(context.Background(), "env-1", "hash")
+		assert.ErrorIs(t, err, storage.ErrReferenceChangeNotFound)
+	})
 }

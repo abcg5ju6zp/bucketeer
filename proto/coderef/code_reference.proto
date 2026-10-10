@@ -45,4 +45,8 @@ message CodeReference {
   string source_url = 16;
   string branch_url = 17;
   string file_extension = 18;  // File extension (e.g., go, ts, cpp)
+  // Monotonically increasing version of this reference. It starts at 1 and
+  // is incremented on every update. Deletes record the version in the change
+  // ledger. Retried requests always return the same version.
+  int64 version = 19;
 }

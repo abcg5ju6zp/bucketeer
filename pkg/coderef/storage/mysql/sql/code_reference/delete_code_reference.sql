@@ -1,1 +1,5 @@
-DELETE FROM code_reference WHERE id = ? 
+DELETE FROM code_reference
+WHERE
+    id = ?
+    AND environment_id = ?
+    AND version = ?

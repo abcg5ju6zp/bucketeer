@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	ftproto "github.com/bucketeer-io/bucketeer/v2/proto/feature"
 )
@@ -346,18 +347,34 @@ func TestEvaluateArchivabilityWithCounts(t *testing.T) {
 }
 
 type stubCodeRefStorage struct {
-	counts map[string]int64
-	err    error
+	watermark int64
+	counts    map[string]int64
+	err       error
+	calls     []struct {
+		watermark int64
+	}
 }
 
-func (s *stubCodeRefStorage) GetCodeReferenceCountsByFeatureIDs(
+func (s *stubCodeRefStorage) GetConfirmedWatermark(
+	ctx context.Context,
+	environmentID string,
+) (int64, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.watermark, nil
+}
+
+func (s *stubCodeRefStorage) CountLiveReferencesAtWatermark(
 	ctx context.Context,
 	environmentID string,
 	featureIDs []string,
+	watermark int64,
 ) (map[string]int64, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
+	s.calls = append(s.calls, struct{ watermark int64 }{watermark})
 	return s.counts, nil
 }
 
@@ -378,25 +395,44 @@ func TestArchivabilityEvaluator_EvaluateArchivability(t *testing.T) {
 	t.Run("returns error when CheckCodeReferences is true but storage is nil", func(t *testing.T) {
 		t.Parallel()
 		e := NewArchivabilityEvaluator(nil)
-		_, err := e.EvaluateArchivability(context.Background(), features, ArchivabilityCriteria{
+		_, _, err := e.EvaluateArchivability(context.Background(), features, ArchivabilityCriteria{
 			UnusedDaysThreshold: 90,
 			CheckCodeReferences: true,
 		}, "env-1")
 		assert.Error(t, err)
 	})
 
-	t.Run("fetches code reference counts and evaluates", func(t *testing.T) {
+	t.Run("fixes the watermark, fetches confirmed counts and evaluates", func(t *testing.T) {
 		t.Parallel()
-		e := NewArchivabilityEvaluator(&stubCodeRefStorage{
-			counts: map[string]int64{"feature-1": 0},
-		})
-		results, err := e.EvaluateArchivability(context.Background(), features, ArchivabilityCriteria{
+		st := &stubCodeRefStorage{
+			watermark: int64(42),
+			counts:    map[string]int64{"feature-1": 0},
+		}
+		e := NewArchivabilityEvaluator(st)
+		results, watermark, err := e.EvaluateArchivability(context.Background(), features, ArchivabilityCriteria{
 			UnusedDaysThreshold: 90,
 			CheckCodeReferences: true,
 		}, "env-1")
 		assert.NoError(t, err)
 		assert.Len(t, results, 1)
 		assert.True(t, results[0].IsArchivable)
+		// the confirmed watermark is returned and forwarded to the count query
+		assert.Equal(t, int64(42), watermark)
+		require.Len(t, st.calls, 1)
+		assert.Equal(t, int64(42), st.calls[0].watermark)
+	})
+
+	t.Run("watermark is zero and counts are not fetched when check disabled", func(t *testing.T) {
+		t.Parallel()
+		st := &stubCodeRefStorage{}
+		e := NewArchivabilityEvaluator(st)
+		_, watermark, err := e.EvaluateArchivability(context.Background(), features, ArchivabilityCriteria{
+			UnusedDaysThreshold: 90,
+			CheckCodeReferences: false,
+		}, "env-1")
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), watermark)
+		assert.Empty(t, st.calls)
 	})
 }
 
@@ -576,24 +612,47 @@ func TestBulkArchiveResult(t *testing.T) {
 		assert.Equal(t, 1, result.FailureCount)
 		assert.Len(t, result.Results, 3)
 	})
+
+	t.Run("add deferred", func(t *testing.T) {
+		t.Parallel()
+		result := NewBulkArchiveResult(2)
+		result.AddDeferred("feature-1", ErrArchiveDeferred)
+
+		assert.Equal(t, 1, result.DeferredCount)
+		assert.Equal(t, 0, result.SuccessCount)
+		assert.Equal(t, 0, result.FailureCount)
+		assert.Len(t, result.Results, 1)
+		assert.True(t, result.Results[0].Deferred)
+		assert.ErrorIs(t, result.Results[0].Error, ErrArchiveDeferred)
+	})
 }
 
 // stubFeatureArchiver is a test implementation of FeatureArchiver.
 type stubFeatureArchiver struct {
-	archiveFunc func(ctx context.Context, featureID, environmentID string) error
-	calls       []struct {
+	archiveFunc func(
+		ctx context.Context,
+		featureID, environmentID string,
+		referenceWatermark int64,
+	) error
+	calls []struct {
 		featureID     string
 		environmentID string
+		watermark     int64
 	}
 }
 
-func (s *stubFeatureArchiver) ArchiveFeature(ctx context.Context, featureID, environmentID string) error {
+func (s *stubFeatureArchiver) ArchiveFeature(
+	ctx context.Context,
+	featureID, environmentID string,
+	referenceWatermark int64,
+) error {
 	s.calls = append(s.calls, struct {
 		featureID     string
 		environmentID string
-	}{featureID, environmentID})
+		watermark     int64
+	}{featureID, environmentID, referenceWatermark})
 	if s.archiveFunc != nil {
-		return s.archiveFunc(ctx, featureID, environmentID)
+		return s.archiveFunc(ctx, featureID, environmentID, referenceWatermark)
 	}
 	return nil
 }
@@ -604,32 +663,38 @@ func TestArchiveFeaturesInBulk(t *testing.T) {
 	t.Run("empty feature list", func(t *testing.T) {
 		t.Parallel()
 		archiver := &stubFeatureArchiver{}
-		result := ArchiveFeaturesInBulk(context.Background(), []string{}, "env-1", archiver)
+		result := ArchiveFeaturesInBulk(
+			context.Background(), []string{}, "env-1", archiver, 0,
+		)
 
 		assert.Equal(t, 0, result.SuccessCount)
 		assert.Equal(t, 0, result.FailureCount)
+		assert.Equal(t, 0, result.DeferredCount)
 		assert.Empty(t, result.Results)
 		assert.Empty(t, archiver.calls)
 	})
 
-	t.Run("all features archived successfully", func(t *testing.T) {
+	t.Run("all features archived successfully, watermark forwarded", func(t *testing.T) {
 		t.Parallel()
 		archiver := &stubFeatureArchiver{}
 		featureIDs := []string{"feature-1", "feature-2", "feature-3"}
 
-		result := ArchiveFeaturesInBulk(context.Background(), featureIDs, "env-1", archiver)
+		result := ArchiveFeaturesInBulk(
+			context.Background(), featureIDs, "env-1", archiver, 77,
+		)
 
 		assert.Equal(t, 3, result.SuccessCount)
 		assert.Equal(t, 0, result.FailureCount)
+		assert.Equal(t, 0, result.DeferredCount)
 		assert.Len(t, result.Results, 3)
 		for _, r := range result.Results {
 			assert.True(t, r.Success)
 			assert.Nil(t, r.Error)
 		}
-		// Verify all features were processed
 		assert.Len(t, archiver.calls, 3)
 		for _, call := range archiver.calls {
 			assert.Equal(t, "env-1", call.environmentID)
+			assert.Equal(t, int64(77), call.watermark)
 		}
 	})
 
@@ -637,27 +702,70 @@ func TestArchiveFeaturesInBulk(t *testing.T) {
 		t.Parallel()
 		expectedErr := assert.AnError
 		archiver := &stubFeatureArchiver{
-			archiveFunc: func(ctx context.Context, featureID, environmentID string) error {
+			archiveFunc: func(
+				ctx context.Context,
+				featureID, environmentID string,
+				referenceWatermark int64,
+			) error {
 				return expectedErr
 			},
 		}
 		featureIDs := []string{"feature-1", "feature-2"}
 
-		result := ArchiveFeaturesInBulk(context.Background(), featureIDs, "env-1", archiver)
+		result := ArchiveFeaturesInBulk(
+			context.Background(), featureIDs, "env-1", archiver, 0,
+		)
 
 		assert.Equal(t, 0, result.SuccessCount)
 		assert.Equal(t, 2, result.FailureCount)
+		assert.Equal(t, 0, result.DeferredCount)
 		assert.Len(t, result.Results, 2)
 		for _, r := range result.Results {
 			assert.False(t, r.Success)
+			assert.False(t, r.Deferred)
 			assert.Equal(t, expectedErr, r.Error)
 		}
+	})
+
+	t.Run("deferred archives are not failures", func(t *testing.T) {
+		t.Parallel()
+		archiver := &stubFeatureArchiver{
+			archiveFunc: func(
+				ctx context.Context,
+				featureID, environmentID string,
+				referenceWatermark int64,
+			) error {
+				if featureID == "feature-2" {
+					return ErrArchiveDeferred
+				}
+				return nil
+			},
+		}
+		featureIDs := []string{"feature-1", "feature-2", "feature-3"}
+
+		result := ArchiveFeaturesInBulk(
+			context.Background(), featureIDs, "env-1", archiver, 5,
+		)
+
+		assert.Equal(t, 2, result.SuccessCount)
+		assert.Equal(t, 0, result.FailureCount)
+		assert.Equal(t, 1, result.DeferredCount)
+		assert.Len(t, result.Results, 3)
+
+		deferred := result.Results[1]
+		assert.Equal(t, "feature-2", deferred.FeatureID)
+		assert.True(t, deferred.Deferred)
+		assert.ErrorIs(t, deferred.Error, ErrArchiveDeferred)
 	})
 
 	t.Run("partial success", func(t *testing.T) {
 		t.Parallel()
 		archiver := &stubFeatureArchiver{
-			archiveFunc: func(ctx context.Context, featureID, environmentID string) error {
+			archiveFunc: func(
+				ctx context.Context,
+				featureID, environmentID string,
+				referenceWatermark int64,
+			) error {
 				if featureID == "feature-2" {
 					return assert.AnError
 				}
@@ -666,13 +774,15 @@ func TestArchiveFeaturesInBulk(t *testing.T) {
 		}
 		featureIDs := []string{"feature-1", "feature-2", "feature-3"}
 
-		result := ArchiveFeaturesInBulk(context.Background(), featureIDs, "env-1", archiver)
+		result := ArchiveFeaturesInBulk(
+			context.Background(), featureIDs, "env-1", archiver, 0,
+		)
 
 		assert.Equal(t, 2, result.SuccessCount)
 		assert.Equal(t, 1, result.FailureCount)
+		assert.Equal(t, 0, result.DeferredCount)
 		assert.Len(t, result.Results, 3)
 
-		// Verify order is preserved
 		assert.Equal(t, "feature-1", result.Results[0].FeatureID)
 		assert.True(t, result.Results[0].Success)
 		assert.Equal(t, "feature-2", result.Results[1].FeatureID)
@@ -685,7 +795,11 @@ func TestArchiveFeaturesInBulk(t *testing.T) {
 		t.Parallel()
 		callCount := 0
 		archiver := &stubFeatureArchiver{
-			archiveFunc: func(ctx context.Context, featureID, environmentID string) error {
+			archiveFunc: func(
+				ctx context.Context,
+				featureID, environmentID string,
+				referenceWatermark int64,
+			) error {
 				callCount++
 				if featureID == "feature-1" {
 					return assert.AnError
@@ -695,9 +809,10 @@ func TestArchiveFeaturesInBulk(t *testing.T) {
 		}
 		featureIDs := []string{"feature-1", "feature-2", "feature-3"}
 
-		result := ArchiveFeaturesInBulk(context.Background(), featureIDs, "env-1", archiver)
+		result := ArchiveFeaturesInBulk(
+			context.Background(), featureIDs, "env-1", archiver, 0,
+		)
 
-		// Verify all features were attempted despite first failure
 		assert.Equal(t, 3, callCount)
 		assert.Equal(t, 2, result.SuccessCount)
 		assert.Equal(t, 1, result.FailureCount)

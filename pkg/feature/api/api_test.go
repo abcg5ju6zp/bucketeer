@@ -137,6 +137,7 @@ func createFeatureService(c *gomock.Controller) *FeatureService {
 		p,
 		singleflight.Group{},
 		"http://localhost",
+		nil, // codeRefWatermarkChecker
 		&defaultOptions,
 		defaultOptions.logger,
 	}

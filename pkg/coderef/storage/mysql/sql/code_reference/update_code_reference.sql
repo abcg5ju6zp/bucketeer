@@ -11,7 +11,9 @@ SET
     repository_type = ?,
     repository_branch = ?,
     commit_hash = ?,
-    updated_at = ?
+    updated_at = ?,
+    version = ?
 WHERE
     id = ?
-    AND environment_id = ? 
+    AND environment_id = ?
+    AND version = ?

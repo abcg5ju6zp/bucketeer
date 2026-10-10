@@ -1139,6 +1139,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		persistentRedisV3Cache,
 		segmentUsersPublisher,
 		domainTopicPublisher,
+		codeRefStorage,
 		logger,
 	)
 	if err != nil {
@@ -1224,6 +1225,9 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		rpc.WithLogger(logger),
 	)
 	go codeReferenceServer.Run()
+	// Recovery relay: finishes changes left pending by earlier requests and
+	// after restarts by republishing their stored events.
+	go codeReferenceService.RunRecovery(pubsubCtx)
 
 	// teamService
 	teamService := teamapi.NewTeamService(
@@ -1715,6 +1719,7 @@ func (s *server) createFeatureService(
 	persistentRedisV3Cache cache.MultiGetDeleteCountCache,
 	segmentUsersPublisher publisher.Publisher,
 	domainTopicPublisher publisher.Publisher,
+	codeRefStorage coderefstorage.CodeReferenceStorage,
 	logger *zap.Logger,
 ) (rpc.Service, error) {
 	featureService := featureapi.NewFeatureService(
@@ -1738,6 +1743,9 @@ func (s *server) createFeatureService(
 		fmt.Sprintf("%s/%s", *s.webhookBaseURL, featureFlagTriggerWebhookPath),
 		featureapi.WithLogger(logger),
 	)
+	// Wire the code reference watermark checker so automatic archives are
+	// rejected at commit time when references changed after the scan watermark.
+	featureService.SetReferenceWatermarkChecker(codeRefStorage)
 
 	return featureService, nil
 }

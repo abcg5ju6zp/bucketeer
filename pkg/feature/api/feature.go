@@ -761,6 +761,34 @@ func (s *FeatureService) updateFeatureWithinTransaction(
 			return nil, nil, statusInvalidArchive.Err()
 		}
 
+		// Reference version watermark precondition (automatic archiver). The
+		// parent feature row is locked first, then changes newer than the
+		// fixed scan watermark are searched; both run inside this
+		// transaction, so a concurrent reference mutation cannot commit in
+		// between the check and the archive update. Requests without a
+		// watermark skip this entirely and keep the existing behaviour.
+		if req.ReferenceWatermark > 0 {
+			if s.codeRefWatermarkChecker == nil {
+				s.logger.Error("Reference watermark requested but no checker is wired")
+				return nil, nil, statusInternal.Err()
+			}
+			hasChanges, checkErr := s.codeRefWatermarkChecker.HasReferenceChangesAfter(
+				ctx, req.EnvironmentId, req.Id, req.ReferenceWatermark,
+			)
+			if checkErr != nil {
+				s.logger.Error("Failed to check reference watermark",
+					log.FieldsFromIncomingContext(ctx).AddFields(
+						zap.Error(checkErr),
+						zap.String("featureId", req.Id),
+						zap.Int64("referenceWatermark", req.ReferenceWatermark),
+					)...)
+				return nil, nil, statusInternal.Err()
+			}
+			if hasChanges {
+				return nil, nil, statusStaleReferenceWatermark.Err()
+			}
+		}
+
 		// Cancel all pending scheduled changes before archiving the flag
 		if err := s.cancelPendingScheduledFlagChanges(
 			ctx,

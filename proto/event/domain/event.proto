@@ -315,6 +315,14 @@ message Editor {
 message Options {
   string comment = 1;
   int32 new_version = 2;
+  // Entity version before the change. 0 when the change created the entity.
+  int64 before_version = 3;
+  // Entity version after the change. 0 when the change deleted the entity.
+  int64 after_version = 4;
+  // Stable, gap-free sequence number of the change within the environment.
+  // It identifies the change together with the event id, and is used as the
+  // reference version watermark by the automatic archiver.
+  int64 sequence = 5;
 }
 
 message FeatureCreatedEvent {

@@ -23,6 +23,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs"
@@ -42,7 +45,7 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 
 	patterns := []struct {
 		desc          string
-		setup         func(*featureAutoArchiver)
+		setup         func(a *featureAutoArchiver)
 		expectedError bool
 	}{
 		{
@@ -92,7 +95,7 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			desc: "success: no archivable features - all recently used",
+			desc: "success: no archivable features - all recently used, no coderef calls",
 			setup: func(a *featureAutoArchiver) {
 				now := time.Now().Unix()
 				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
@@ -105,15 +108,14 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 					Return([]*featureproto.Feature{
 						createTestFeature("feature-1", now-86400), // used 1 day ago
 					}, 1, int64(1), nil)
-				// No code ref check since CheckCodeReferences is false
 			},
 			expectedError: false,
 		},
 		{
-			desc: "success: archive multiple features",
+			desc: "success: archive multiple features without watermark",
 			setup: func(a *featureAutoArchiver) {
 				now := time.Now().Unix()
-				oldTime := now - (100 * 24 * 60 * 60) // 100 days ago
+				oldTime := now - (100 * 24 * 60 * 60)
 				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
 					ListAutoArchiveEnabledEnvironments(gomock.Any()).
 					Return([]*environmentdomain.EnvironmentV2{
@@ -125,19 +127,25 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 						createTestFeature("feature-1", oldTime),
 						createTestFeature("feature-2", oldTime),
 					}, 2, int64(2), nil)
-				// CheckCodeReferences is false, so no code ref storage call
 				a.featureClient.(*featureclientmock.MockClient).EXPECT().
 					UpdateFeature(gomock.Any(), gomock.Any()).
-					Return(&featureproto.UpdateFeatureResponse{}, nil).
+					DoAndReturn(func(
+						ctx context.Context,
+						req *featureproto.UpdateFeatureRequest,
+						_ ...grpc.CallOption,
+					) (*featureproto.UpdateFeatureResponse, error) {
+						assert.Equal(t, int64(0), req.ReferenceWatermark)
+						return &featureproto.UpdateFeatureResponse{}, nil
+					}).
 					Times(2)
 			},
 			expectedError: false,
 		},
 		{
-			desc: "success: archive features with code reference check",
+			desc: "success: archive with fixed watermark and confirmed counts",
 			setup: func(a *featureAutoArchiver) {
 				now := time.Now().Unix()
-				oldTime := now - (100 * 24 * 60 * 60) // 100 days ago
+				oldTime := now - (100 * 24 * 60 * 60)
 				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
 					ListAutoArchiveEnabledEnvironments(gomock.Any()).
 					Return([]*environmentdomain.EnvironmentV2{
@@ -149,24 +157,89 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 						createTestFeature("feature-1", oldTime),
 						createTestFeature("feature-2", oldTime),
 					}, 2, int64(2), nil)
-				a.codeRefStorage.(*coderefstoragemock.MockCodeReferenceStorage).EXPECT().
-					GetCodeReferenceCountsByFeatureIDs(gomock.Any(), "env-1", []string{"feature-1", "feature-2"}).
+				codeRefMock := a.codeRefStorage.(*coderefstoragemock.MockCodeReferenceStorage)
+				codeRefMock.EXPECT().
+					GetConfirmedWatermark(gomock.Any(), "env-1").
+					Return(int64(99), nil)
+				codeRefMock.EXPECT().
+					CountLiveReferencesAtWatermark(
+						gomock.Any(), "env-1",
+						[]string{"feature-1", "feature-2"}, int64(99),
+					).
 					Return(map[string]int64{
-						"feature-1": 0, // no code refs, can archive
-						"feature-2": 1, // has code refs, cannot archive
+						"feature-1": 0,
+						"feature-2": 1,
 					}, nil)
 				a.featureClient.(*featureclientmock.MockClient).EXPECT().
 					UpdateFeature(gomock.Any(), gomock.Any()).
-					Return(&featureproto.UpdateFeatureResponse{}, nil).
-					Times(1) // Only feature-1 should be archived
+					DoAndReturn(func(
+						ctx context.Context,
+						req *featureproto.UpdateFeatureRequest,
+						_ ...grpc.CallOption,
+					) (*featureproto.UpdateFeatureResponse, error) {
+						assert.Equal(t, int64(99), req.ReferenceWatermark)
+						assert.Equal(t, "feature-1", req.Id)
+						return &featureproto.UpdateFeatureResponse{}, nil
+					})
 			},
 			expectedError: false,
+		},
+		{
+			desc: "success: deferred archive (failed precondition) is not a job error",
+			setup: func(a *featureAutoArchiver) {
+				now := time.Now().Unix()
+				oldTime := now - (100 * 24 * 60 * 60)
+				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
+					ListAutoArchiveEnabledEnvironments(gomock.Any()).
+					Return([]*environmentdomain.EnvironmentV2{
+						createTestEnvironment("env-1", 60, true),
+					}, nil)
+				a.ftStorage.(*featurestoragemock.MockFeatureStorage).EXPECT().
+					ListFeatures(gomock.Any(), gomock.Any()).
+					Return([]*featureproto.Feature{
+						createTestFeature("feature-1", oldTime),
+					}, 1, int64(1), nil)
+				codeRefMock := a.codeRefStorage.(*coderefstoragemock.MockCodeReferenceStorage)
+				codeRefMock.EXPECT().
+					GetConfirmedWatermark(gomock.Any(), "env-1").
+					Return(int64(50), nil)
+				codeRefMock.EXPECT().
+					CountLiveReferencesAtWatermark(
+						gomock.Any(), "env-1", []string{"feature-1"}, int64(50),
+					).
+					Return(map[string]int64{"feature-1": 0}, nil)
+				a.featureClient.(*featureclientmock.MockClient).EXPECT().
+					UpdateFeature(gomock.Any(), gomock.Any()).
+					Return(nil, status.Error(codes.FailedPrecondition, "stale"))
+			},
+			expectedError: false,
+		},
+		{
+			desc: "error: watermark lookup fails",
+			setup: func(a *featureAutoArchiver) {
+				now := time.Now().Unix()
+				oldTime := now - (100 * 24 * 60 * 60)
+				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
+					ListAutoArchiveEnabledEnvironments(gomock.Any()).
+					Return([]*environmentdomain.EnvironmentV2{
+						createTestEnvironment("env-1", 60, true),
+					}, nil)
+				a.ftStorage.(*featurestoragemock.MockFeatureStorage).EXPECT().
+					ListFeatures(gomock.Any(), gomock.Any()).
+					Return([]*featureproto.Feature{
+						createTestFeature("feature-1", oldTime),
+					}, 1, int64(1), nil)
+				a.codeRefStorage.(*coderefstoragemock.MockCodeReferenceStorage).EXPECT().
+					GetConfirmedWatermark(gomock.Any(), "env-1").
+					Return(int64(0), errors.New("db error"))
+			},
+			expectedError: true,
 		},
 		{
 			desc: "error: partial failure - one archive fails",
 			setup: func(a *featureAutoArchiver) {
 				now := time.Now().Unix()
-				oldTime := now - (100 * 24 * 60 * 60) // 100 days ago
+				oldTime := now - (100 * 24 * 60 * 60)
 				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
 					ListAutoArchiveEnabledEnvironments(gomock.Any()).
 					Return([]*environmentdomain.EnvironmentV2{
@@ -190,42 +263,10 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			desc: "success: multiple environments with different criteria",
-			setup: func(a *featureAutoArchiver) {
-				now := time.Now().Unix()
-				oldTime := now - (100 * 24 * 60 * 60) // 100 days ago
-				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
-					ListAutoArchiveEnabledEnvironments(gomock.Any()).
-					Return([]*environmentdomain.EnvironmentV2{
-						createTestEnvironment("env-1", 60, false),
-						createTestEnvironment("env-2", 30, false),
-					}, nil)
-				// First environment
-				a.ftStorage.(*featurestoragemock.MockFeatureStorage).EXPECT().
-					ListFeatures(gomock.Any(), gomock.Any()).
-					Return([]*featureproto.Feature{
-						createTestFeature("feature-1", oldTime),
-					}, 1, int64(1), nil)
-				a.featureClient.(*featureclientmock.MockClient).EXPECT().
-					UpdateFeature(gomock.Any(), gomock.Any()).
-					Return(&featureproto.UpdateFeatureResponse{}, nil)
-				// Second environment
-				a.ftStorage.(*featurestoragemock.MockFeatureStorage).EXPECT().
-					ListFeatures(gomock.Any(), gomock.Any()).
-					Return([]*featureproto.Feature{
-						createTestFeature("feature-2", oldTime),
-					}, 1, int64(1), nil)
-				a.featureClient.(*featureclientmock.MockClient).EXPECT().
-					UpdateFeature(gomock.Any(), gomock.Any()).
-					Return(&featureproto.UpdateFeatureResponse{}, nil)
-			},
-			expectedError: false,
-		},
-		{
 			desc: "success: skip features with dependencies",
 			setup: func(a *featureAutoArchiver) {
 				now := time.Now().Unix()
-				oldTime := now - (100 * 24 * 60 * 60) // 100 days ago
+				oldTime := now - (100 * 24 * 60 * 60)
 				a.envStorage.(*environmentstoragemock.MockEnvironmentStorage).EXPECT().
 					ListAutoArchiveEnabledEnvironments(gomock.Any()).
 					Return([]*environmentdomain.EnvironmentV2{
@@ -235,9 +276,8 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 					ListFeatures(gomock.Any(), gomock.Any()).
 					Return([]*featureproto.Feature{
 						createTestFeature("feature-1", oldTime),
-						createTestFeatureWithPrerequisite("feature-2", oldTime, "feature-1"), // depends on feature-1
+						createTestFeatureWithPrerequisite("feature-2", oldTime, "feature-1"),
 					}, 2, int64(2), nil)
-				// Only feature-2 should be archived (feature-1 has dependents)
 				a.featureClient.(*featureclientmock.MockClient).EXPECT().
 					UpdateFeature(gomock.Any(), gomock.Any()).
 					Return(&featureproto.UpdateFeatureResponse{}, nil).
@@ -255,8 +295,7 @@ func TestFeatureAutoArchiver_Run(t *testing.T) {
 			archiver := newMockFeatureAutoArchiver(t, controller)
 			p.setup(archiver)
 
-			ctx := context.Background()
-			err := archiver.Run(ctx)
+			err := archiver.Run(context.Background())
 
 			if p.expectedError {
 				assert.Error(t, err)
@@ -271,30 +310,46 @@ func TestFeatureAutoArchiver_ArchiveFeature(t *testing.T) {
 	t.Parallel()
 
 	patterns := []struct {
-		desc          string
-		setup         func(*featureAutoArchiver)
-		featureID     string
-		environmentID string
-		expectedError bool
+		desc           string
+		setup          func(a *featureAutoArchiver)
+		featureID      string
+		environmentID  string
+		watermark      int64
+		expectedError  bool
+		expectDeferred bool
 	}{
 		{
-			desc: "success: archive feature",
+			desc: "success: archive feature with watermark forwarded",
 			setup: func(a *featureAutoArchiver) {
 				a.featureClient.(*featureclientmock.MockClient).EXPECT().
 					UpdateFeature(gomock.Any(), &featureproto.UpdateFeatureRequest{
-						Id:            "feature-1",
-						EnvironmentId: "env-1",
-						Archived:      wrapperspb.Bool(true),
-						Comment:       "Archived automatically due to inactivity (environment setting)",
+						Id:                 "feature-1",
+						EnvironmentId:      "env-1",
+						Archived:           wrapperspb.Bool(true),
+						Comment:            "Archived automatically due to inactivity (environment setting)",
+						ReferenceWatermark: int64(33),
 					}).
 					Return(&featureproto.UpdateFeatureResponse{}, nil)
 			},
 			featureID:     "feature-1",
 			environmentID: "env-1",
+			watermark:     33,
 			expectedError: false,
 		},
 		{
-			desc: "error: archive feature fails",
+			desc: "deferred: feature service rejects with failed precondition",
+			setup: func(a *featureAutoArchiver) {
+				a.featureClient.(*featureclientmock.MockClient).EXPECT().
+					UpdateFeature(gomock.Any(), gomock.Any()).
+					Return(nil, status.Error(codes.FailedPrecondition, "stale"))
+			},
+			featureID:      "feature-1",
+			environmentID:  "env-1",
+			watermark:      10,
+			expectDeferred: true,
+		},
+		{
+			desc: "error: archive feature fails with other code",
 			setup: func(a *featureAutoArchiver) {
 				a.featureClient.(*featureclientmock.MockClient).EXPECT().
 					UpdateFeature(gomock.Any(), gomock.Any()).
@@ -314,12 +369,16 @@ func TestFeatureAutoArchiver_ArchiveFeature(t *testing.T) {
 			archiver := newMockFeatureAutoArchiver(t, controller)
 			p.setup(archiver)
 
-			ctx := context.Background()
-			err := archiver.ArchiveFeature(ctx, p.featureID, p.environmentID)
+			err := archiver.ArchiveFeature(
+				context.Background(), p.featureID, p.environmentID, p.watermark,
+			)
 
-			if p.expectedError {
+			switch {
+			case p.expectDeferred:
+				assert.ErrorIs(t, err, domain.ErrArchiveDeferred)
+			case p.expectedError:
 				assert.Error(t, err)
-			} else {
+			default:
 				assert.NoError(t, err)
 			}
 		})

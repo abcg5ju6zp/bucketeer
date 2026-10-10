@@ -14,7 +14,8 @@ SELECT
     commit_hash,
     environment_id,
     created_at,
-    updated_at
+    updated_at,
+    version
 FROM
     code_reference
 WHERE

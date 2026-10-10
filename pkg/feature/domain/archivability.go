@@ -68,6 +68,10 @@ type BulkArchiveResult struct {
 	SuccessCount int
 	// FailureCount is the number of features that failed to archive.
 	FailureCount int
+	// DeferredCount is the number of features whose archival was abandoned for
+	// this round because a reference change newer than the fixed watermark was
+	// detected at commit time. They are retried in the next round.
+	DeferredCount int
 	// Results contains individual results for each feature.
 	Results []*SingleArchiveResult
 }
@@ -78,21 +82,35 @@ type SingleArchiveResult struct {
 	FeatureID string
 	// Success indicates whether the archive operation succeeded.
 	Success bool
+	// Deferred indicates the archival was abandoned for this round because a
+	// reference change newer than the watermark was detected at commit time.
+	Deferred bool
 	// Error contains the error if the operation failed.
 	Error error
 }
 
-// CodeRefStorage defines the interface for accessing code reference counts.
-// This interface is implemented by the coderef storage layer.
+// CodeRefStorage defines the interface for accessing the confirmed code
+// reference state. This interface is implemented by the coderef storage layer.
 type CodeRefStorage interface {
-	// GetCodeReferenceCountsByFeatureIDs returns a map of feature ID to code reference count
-	// for the given environment.
-	GetCodeReferenceCountsByFeatureIDs(
+	// GetConfirmedWatermark returns the reference version watermark: the
+	// sequence of the last change whose event is published with no earlier
+	// pending change.
+	GetConfirmedWatermark(ctx context.Context, environmentID string) (int64, error)
+	// CountLiveReferencesAtWatermark returns the number of references that
+	// were live at the given watermark, per feature ID.
+	CountLiveReferencesAtWatermark(
 		ctx context.Context,
 		environmentID string,
 		featureIDs []string,
+		watermark int64,
 	) (map[string]int64, error)
 }
+
+// ErrArchiveDeferred is returned by a FeatureArchiver when the archive was
+// rejected at commit time because a code reference change newer than the fixed
+// watermark exists. It is not a failure: the feature is retried in the next
+// round.
+var ErrArchiveDeferred = errors.New("feature: archive deferred, references changed after the watermark")
 
 // ArchivabilityEvaluator provides centralized logic for evaluating feature archivability.
 // It can be used by both batch jobs and API endpoints.
@@ -109,17 +127,20 @@ func NewArchivabilityEvaluator(codeRefStorage CodeRefStorage) *ArchivabilityEval
 	}
 }
 
-// EvaluateArchivability evaluates the archivability of multiple features
-// based on the given criteria. It fetches code reference counts internally
-// to avoid N+1 queries.
+// EvaluateArchivability evaluates the archivability of the fixed feature list
+// based on the given criteria. When code references are checked, it first
+// fixes the reference version watermark, then counts only changes confirmed
+// at or below the watermark; changes after it belong to the next round.
+// The returned watermark (0 when the check is disabled) must be passed to
+// the archive operation for the commit-time check.
 func (e *ArchivabilityEvaluator) EvaluateArchivability(
 	ctx context.Context,
 	features []*ftproto.Feature,
 	criteria ArchivabilityCriteria,
 	environmentID string,
-) ([]*ArchivabilityResult, error) {
+) ([]*ArchivabilityResult, int64, error) {
 	if criteria.CheckCodeReferences && e.codeRefStorage == nil {
-		return nil, errCodeRefStorageRequired
+		return nil, 0, errCodeRefStorageRequired
 	}
 
 	// Build feature IDs list for bulk code reference fetch
@@ -128,20 +149,26 @@ func (e *ArchivabilityEvaluator) EvaluateArchivability(
 		featureIDs[i] = f.Id
 	}
 
-	// Bulk fetch code reference counts to avoid N+1 queries
-	var codeRefCounts map[string]int64
-	var err error
+	// Fix the watermark and bulk fetch the confirmed counts to avoid N+1
+	// queries.
+	codeRefCounts := make(map[string]int64)
+	watermark := int64(0)
 	if criteria.CheckCodeReferences {
-		codeRefCounts, err = e.codeRefStorage.GetCodeReferenceCountsByFeatureIDs(ctx, environmentID, featureIDs)
+		var err error
+		watermark, err = e.codeRefStorage.GetConfirmedWatermark(ctx, environmentID)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-	} else {
-		codeRefCounts = make(map[string]int64)
+		codeRefCounts, err = e.codeRefStorage.CountLiveReferencesAtWatermark(
+			ctx, environmentID, featureIDs, watermark,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	// Use the standalone function for actual evaluation
-	return EvaluateArchivabilityWithCounts(features, criteria, codeRefCounts), nil
+	return EvaluateArchivabilityWithCounts(features, criteria, codeRefCounts), watermark, nil
 }
 
 // EvaluateArchivabilityWithCounts evaluates the archivability of multiple features
@@ -305,6 +332,17 @@ func (r *BulkArchiveResult) AddFailure(featureID string, err error) {
 	r.FailureCount++
 }
 
+// AddDeferred adds a result for an archive abandoned for this round because
+// references changed after the fixed watermark.
+func (r *BulkArchiveResult) AddDeferred(featureID string, err error) {
+	r.Results = append(r.Results, &SingleArchiveResult{
+		FeatureID: featureID,
+		Deferred:  true,
+		Error:     err,
+	})
+	r.DeferredCount++
+}
+
 // FeatureArchiver defines the interface for archiving a single feature.
 // This interface is implemented by higher-level layers (API, batch) that have
 // access to infrastructure dependencies (mysql, publisher, command handler).
@@ -312,28 +350,41 @@ func (r *BulkArchiveResult) AddFailure(featureID string, err error) {
 // - Running the archive operation in a transaction
 // - Creating and publishing domain events
 // - Incrementing the feature version
+// referenceWatermark is the fixed scan watermark; it is 0 when the code
+// reference check is disabled and keeps the legacy behaviour.
 type FeatureArchiver interface {
 	// ArchiveFeature archives a single feature by ID.
-	// Returns an error if the archive operation fails.
-	ArchiveFeature(ctx context.Context, featureID, environmentID string) error
+	// Returns ErrArchiveDeferred if a reference change newer than the
+	// watermark was detected at commit time.
+	ArchiveFeature(
+		ctx context.Context,
+		featureID, environmentID string,
+		referenceWatermark int64,
+	) error
 }
 
 // ArchiveFeaturesInBulk archives multiple features using the provided archiver.
 // Each feature is archived independently to support partial success.
-// Returns BulkArchiveResult containing success/failure counts and individual results.
+// Returns BulkArchiveResult containing success/failure/deferred counts and
+// individual results.
 func ArchiveFeaturesInBulk(
 	ctx context.Context,
 	featureIDs []string,
 	environmentID string,
 	archiver FeatureArchiver,
+	referenceWatermark int64,
 ) *BulkArchiveResult {
 	result := NewBulkArchiveResult(len(featureIDs))
 
 	for _, featureID := range featureIDs {
-		if err := archiver.ArchiveFeature(ctx, featureID, environmentID); err != nil {
-			result.AddFailure(featureID, err)
-		} else {
+		err := archiver.ArchiveFeature(ctx, featureID, environmentID, referenceWatermark)
+		switch {
+		case err == nil:
 			result.AddSuccess(featureID)
+		case errors.Is(err, ErrArchiveDeferred):
+			result.AddDeferred(featureID, err)
+		default:
+			result.AddFailure(featureID, err)
 		}
 	}
 

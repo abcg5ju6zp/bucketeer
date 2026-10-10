@@ -13,16 +13,16 @@ import (
 	context "context"
 	reflect "reflect"
 
-	gomock "go.uber.org/mock/gomock"
-
 	domain "github.com/bucketeer-io/bucketeer/v2/pkg/coderef/domain"
 	storage "github.com/bucketeer-io/bucketeer/v2/pkg/coderef/storage"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockCodeReferenceStorage is a mock of CodeReferenceStorage interface.
 type MockCodeReferenceStorage struct {
 	ctrl     *gomock.Controller
 	recorder *MockCodeReferenceStorageMockRecorder
+	isgomock struct{}
 }
 
 // MockCodeReferenceStorageMockRecorder is the mock recorder for MockCodeReferenceStorage.
@@ -42,32 +42,77 @@ func (m *MockCodeReferenceStorage) EXPECT() *MockCodeReferenceStorageMockRecorde
 	return m.recorder
 }
 
-// CreateCodeReference mocks base method.
-func (m *MockCodeReferenceStorage) CreateCodeReference(ctx context.Context, codeRef *domain.CodeReference) error {
+// CountLiveReferencesAtWatermark mocks base method.
+func (m *MockCodeReferenceStorage) CountLiveReferencesAtWatermark(ctx context.Context, environmentID string, featureIDs []string, watermark int64) (map[string]int64, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreateCodeReference", ctx, codeRef)
+	ret := m.ctrl.Call(m, "CountLiveReferencesAtWatermark", ctx, environmentID, featureIDs, watermark)
+	ret0, _ := ret[0].(map[string]int64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CountLiveReferencesAtWatermark indicates an expected call of CountLiveReferencesAtWatermark.
+func (mr *MockCodeReferenceStorageMockRecorder) CountLiveReferencesAtWatermark(ctx, environmentID, featureIDs, watermark any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CountLiveReferencesAtWatermark", reflect.TypeOf((*MockCodeReferenceStorage)(nil).CountLiveReferencesAtWatermark), ctx, environmentID, featureIDs, watermark)
+}
+
+// CreateReferenceAndChange mocks base method.
+func (m *MockCodeReferenceStorage) CreateReferenceAndChange(ctx context.Context, codeRef *domain.CodeReference, change *domain.ReferenceChange, buildEvent storage.EventBuilder) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateReferenceAndChange", ctx, codeRef, change, buildEvent)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// CreateCodeReference indicates an expected call of CreateCodeReference.
-func (mr *MockCodeReferenceStorageMockRecorder) CreateCodeReference(ctx, codeRef any) *gomock.Call {
+// CreateReferenceAndChange indicates an expected call of CreateReferenceAndChange.
+func (mr *MockCodeReferenceStorageMockRecorder) CreateReferenceAndChange(ctx, codeRef, change, buildEvent any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateCodeReference", reflect.TypeOf((*MockCodeReferenceStorage)(nil).CreateCodeReference), ctx, codeRef)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateReferenceAndChange", reflect.TypeOf((*MockCodeReferenceStorage)(nil).CreateReferenceAndChange), ctx, codeRef, change, buildEvent)
 }
 
-// DeleteCodeReference mocks base method.
-func (m *MockCodeReferenceStorage) DeleteCodeReference(ctx context.Context, id string) error {
+// DeleteReferenceAndChange mocks base method.
+func (m *MockCodeReferenceStorage) DeleteReferenceAndChange(ctx context.Context, change *domain.ReferenceChange, buildEvent storage.EventBuilder) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteCodeReference", ctx, id)
+	ret := m.ctrl.Call(m, "DeleteReferenceAndChange", ctx, change, buildEvent)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// DeleteCodeReference indicates an expected call of DeleteCodeReference.
-func (mr *MockCodeReferenceStorageMockRecorder) DeleteCodeReference(ctx, id any) *gomock.Call {
+// DeleteReferenceAndChange indicates an expected call of DeleteReferenceAndChange.
+func (mr *MockCodeReferenceStorageMockRecorder) DeleteReferenceAndChange(ctx, change, buildEvent any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteCodeReference", reflect.TypeOf((*MockCodeReferenceStorage)(nil).DeleteCodeReference), ctx, id)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteReferenceAndChange", reflect.TypeOf((*MockCodeReferenceStorage)(nil).DeleteReferenceAndChange), ctx, change, buildEvent)
+}
+
+// GetChange mocks base method.
+func (m *MockCodeReferenceStorage) GetChange(ctx context.Context, id string) (*domain.ReferenceChange, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetChange", ctx, id)
+	ret0, _ := ret[0].(*domain.ReferenceChange)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetChange indicates an expected call of GetChange.
+func (mr *MockCodeReferenceStorageMockRecorder) GetChange(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChange", reflect.TypeOf((*MockCodeReferenceStorage)(nil).GetChange), ctx, id)
+}
+
+// GetChangeByRequestHash mocks base method.
+func (m *MockCodeReferenceStorage) GetChangeByRequestHash(ctx context.Context, environmentID, requestHash string) (*domain.ReferenceChange, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetChangeByRequestHash", ctx, environmentID, requestHash)
+	ret0, _ := ret[0].(*domain.ReferenceChange)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetChangeByRequestHash indicates an expected call of GetChangeByRequestHash.
+func (mr *MockCodeReferenceStorageMockRecorder) GetChangeByRequestHash(ctx, environmentID, requestHash any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetChangeByRequestHash", reflect.TypeOf((*MockCodeReferenceStorage)(nil).GetChangeByRequestHash), ctx, environmentID, requestHash)
 }
 
 // GetCodeReference mocks base method.
@@ -85,19 +130,34 @@ func (mr *MockCodeReferenceStorageMockRecorder) GetCodeReference(ctx, id any) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCodeReference", reflect.TypeOf((*MockCodeReferenceStorage)(nil).GetCodeReference), ctx, id)
 }
 
-// GetCodeReferenceCountsByFeatureIDs mocks base method.
-func (m *MockCodeReferenceStorage) GetCodeReferenceCountsByFeatureIDs(ctx context.Context, environmentID string, featureIDs []string) (map[string]int64, error) {
+// GetConfirmedWatermark mocks base method.
+func (m *MockCodeReferenceStorage) GetConfirmedWatermark(ctx context.Context, environmentID string) (int64, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetCodeReferenceCountsByFeatureIDs", ctx, environmentID, featureIDs)
-	ret0, _ := ret[0].(map[string]int64)
+	ret := m.ctrl.Call(m, "GetConfirmedWatermark", ctx, environmentID)
+	ret0, _ := ret[0].(int64)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// GetCodeReferenceCountsByFeatureIDs indicates an expected call of GetCodeReferenceCountsByFeatureIDs.
-func (mr *MockCodeReferenceStorageMockRecorder) GetCodeReferenceCountsByFeatureIDs(ctx, environmentID, featureIDs any) *gomock.Call {
+// GetConfirmedWatermark indicates an expected call of GetConfirmedWatermark.
+func (mr *MockCodeReferenceStorageMockRecorder) GetConfirmedWatermark(ctx, environmentID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCodeReferenceCountsByFeatureIDs", reflect.TypeOf((*MockCodeReferenceStorage)(nil).GetCodeReferenceCountsByFeatureIDs), ctx, environmentID, featureIDs)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetConfirmedWatermark", reflect.TypeOf((*MockCodeReferenceStorage)(nil).GetConfirmedWatermark), ctx, environmentID)
+}
+
+// HasReferenceChangesAfter mocks base method.
+func (m *MockCodeReferenceStorage) HasReferenceChangesAfter(ctx context.Context, environmentID, featureID string, watermark int64) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HasReferenceChangesAfter", ctx, environmentID, featureID, watermark)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// HasReferenceChangesAfter indicates an expected call of HasReferenceChangesAfter.
+func (mr *MockCodeReferenceStorageMockRecorder) HasReferenceChangesAfter(ctx, environmentID, featureID, watermark any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasReferenceChangesAfter", reflect.TypeOf((*MockCodeReferenceStorage)(nil).HasReferenceChangesAfter), ctx, environmentID, featureID, watermark)
 }
 
 // ListCodeReferences mocks base method.
@@ -117,16 +177,45 @@ func (mr *MockCodeReferenceStorageMockRecorder) ListCodeReferences(ctx, params a
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListCodeReferences", reflect.TypeOf((*MockCodeReferenceStorage)(nil).ListCodeReferences), ctx, params)
 }
 
-// UpdateCodeReference mocks base method.
-func (m *MockCodeReferenceStorage) UpdateCodeReference(ctx context.Context, codeRef *domain.CodeReference) error {
+// ListPendingChanges mocks base method.
+func (m *MockCodeReferenceStorage) ListPendingChanges(ctx context.Context, limit int) ([]*domain.ReferenceChange, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateCodeReference", ctx, codeRef)
+	ret := m.ctrl.Call(m, "ListPendingChanges", ctx, limit)
+	ret0, _ := ret[0].([]*domain.ReferenceChange)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListPendingChanges indicates an expected call of ListPendingChanges.
+func (mr *MockCodeReferenceStorageMockRecorder) ListPendingChanges(ctx, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPendingChanges", reflect.TypeOf((*MockCodeReferenceStorage)(nil).ListPendingChanges), ctx, limit)
+}
+
+// MarkChangePublished mocks base method.
+func (m *MockCodeReferenceStorage) MarkChangePublished(ctx context.Context, id string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkChangePublished", ctx, id)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// UpdateCodeReference indicates an expected call of UpdateCodeReference.
-func (mr *MockCodeReferenceStorageMockRecorder) UpdateCodeReference(ctx, codeRef any) *gomock.Call {
+// MarkChangePublished indicates an expected call of MarkChangePublished.
+func (mr *MockCodeReferenceStorageMockRecorder) MarkChangePublished(ctx, id any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateCodeReference", reflect.TypeOf((*MockCodeReferenceStorage)(nil).UpdateCodeReference), ctx, codeRef)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkChangePublished", reflect.TypeOf((*MockCodeReferenceStorage)(nil).MarkChangePublished), ctx, id)
+}
+
+// UpdateReferenceAndChange mocks base method.
+func (m *MockCodeReferenceStorage) UpdateReferenceAndChange(ctx context.Context, codeRef *domain.CodeReference, change *domain.ReferenceChange, buildEvent storage.EventBuilder) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateReferenceAndChange", ctx, codeRef, change, buildEvent)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateReferenceAndChange indicates an expected call of UpdateReferenceAndChange.
+func (mr *MockCodeReferenceStorageMockRecorder) UpdateReferenceAndChange(ctx, codeRef, change, buildEvent any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateReferenceAndChange", reflect.TypeOf((*MockCodeReferenceStorage)(nil).UpdateReferenceAndChange), ctx, codeRef, change, buildEvent)
 }

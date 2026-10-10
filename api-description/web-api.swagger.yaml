@@ -11428,6 +11428,10 @@ definitions:
       fileExtension:
         type: string
         title: File extension (e.g., go, ts, cpp)
+      version:
+        type: integer
+        format: int64
+        title: Monotonically increasing version of this reference
   coderefCreateCodeReferenceRequest:
     type: object
     properties:
@@ -13994,6 +13998,10 @@ definitions:
         $ref: '#/definitions/featureVariationValueSchema'
       clearVariationValueSchema:
         type: boolean
+      referenceWatermark:
+        type: integer
+        format: int64
+        title: Reference version watermark for the automatic archiver
     required:
       - environmentId
       - id

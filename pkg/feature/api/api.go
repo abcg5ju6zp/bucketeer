@@ -74,8 +74,27 @@ type FeatureService struct {
 	domainPublisher            publisher.Publisher
 	flightgroup                singleflight.Group
 	triggerURL                 string
+	codeRefWatermarkChecker    ReferenceWatermarkChecker
 	opts                       *options
 	logger                     *zap.Logger
+}
+
+// ReferenceWatermarkChecker checks, within the update transaction, whether a
+// code reference change newer than the fixed scan watermark exists for the
+// feature. It is implemented by the coderef storage. The check is active only
+// for requests that carry a positive reference_watermark; all other requests
+// keep their existing behaviour.
+type ReferenceWatermarkChecker interface {
+	HasReferenceChangesAfter(
+		ctx context.Context,
+		environmentID, featureID string,
+		watermark int64,
+	) (bool, error)
+}
+
+// SetReferenceWatermarkChecker injects the code reference watermark checker.
+func (s *FeatureService) SetReferenceWatermarkChecker(checker ReferenceWatermarkChecker) {
+	s.codeRefWatermarkChecker = checker
 }
 
 func NewFeatureService(

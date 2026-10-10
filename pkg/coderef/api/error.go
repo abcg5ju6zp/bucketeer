@@ -64,4 +64,17 @@ var (
 	statusPermissionDenied = api.NewGRPCStatus(
 		bkterr.NewErrorPermissionDenied(bkterr.CoderefPackageName, "permission denied"),
 	)
+	statusInternal = api.NewGRPCStatus(
+		bkterr.NewErrorInternal(bkterr.CoderefPackageName, "internal"),
+	)
+	// statusEventNotConfirmed is returned when the reference row is committed
+	// but the domain event could not be published in this call. The recovery
+	// relay republishes the stored event; retrying the same request resolves to
+	// the same change and version.
+	statusEventNotConfirmed = api.NewGRPCStatus(
+		bkterr.NewErrorUnavailable(
+			bkterr.CoderefPackageName,
+			"code reference event not confirmed, please retry the same request",
+		),
+	)
 )

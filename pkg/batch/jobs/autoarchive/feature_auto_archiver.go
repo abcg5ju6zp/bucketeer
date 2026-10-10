@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/bucketeer-io/bucketeer/v2/pkg/batch/jobs"
@@ -144,8 +146,10 @@ func (a *featureAutoArchiver) processEnvironment(
 		CheckCodeReferences: env.AutoArchiveCheckCodeRefs,
 	}
 
-	// Evaluate archivability using pre-created evaluator
-	results, err := a.evaluator.EvaluateArchivability(ctx, features, criteria, env.Id)
+	// Evaluate archivability using pre-created evaluator. The feature list
+	// (already loaded above) and the reference watermark are fixed for this
+	// scan; changes after the watermark are handled in the next round.
+	results, watermark, err := a.evaluator.EvaluateArchivability(ctx, features, criteria, env.Id)
 	if err != nil {
 		a.logger.Error("Failed to evaluate archivability",
 			zap.String("environmentId", env.Id),
@@ -168,21 +172,25 @@ func (a *featureAutoArchiver) processEnvironment(
 		zap.String("environmentId", env.Id),
 		zap.Int("archivableCount", len(archivableIDs)),
 		zap.Int("evaluatedCount", len(results)),
+		zap.Int64("referenceWatermark", watermark),
 	)
 
-	// Archive features in bulk
-	bulkResult := domain.ArchiveFeaturesInBulk(ctx, archivableIDs, env.Id, a)
+	// Archive features in bulk, passing the fixed watermark so each archive
+	// is rejected at commit time if references changed after it.
+	bulkResult := domain.ArchiveFeaturesInBulk(ctx, archivableIDs, env.Id, a, watermark)
 
 	a.logger.Info("Archive results",
 		zap.String("environmentId", env.Id),
 		zap.Int("successCount", bulkResult.SuccessCount),
 		zap.Int("failureCount", bulkResult.FailureCount),
+		zap.Int("deferredCount", bulkResult.DeferredCount),
 	)
 
-	// Return error if any archive failed
+	// Deferred archives are expected under concurrency and are retried in
+	// the next round, so only hard failures make the job return an error.
 	if bulkResult.FailureCount > 0 {
 		for _, result := range bulkResult.Results {
-			if !result.Success {
+			if !result.Success && !result.Deferred {
 				return result.Error
 			}
 		}
@@ -213,18 +221,32 @@ func (a *featureAutoArchiver) listNonArchivedFeatures(
 }
 
 // ArchiveFeature implements domain.FeatureArchiver interface.
-// It archives a single feature by calling the feature service API.
+// It archives a single feature by calling the feature service API. The fixed
+// scan watermark is forwarded as reference_watermark; if the feature service
+// detects a reference change after it at commit time, it rejects the request
+// with FailedPrecondition and this method returns domain.ErrArchiveDeferred,
+// so the feature is retried in the next round instead of failing the job.
 func (a *featureAutoArchiver) ArchiveFeature(
 	ctx context.Context,
 	featureID, environmentID string,
+	referenceWatermark int64,
 ) error {
 	_, err := a.featureClient.UpdateFeature(ctx, &featureproto.UpdateFeatureRequest{
-		Id:            featureID,
-		EnvironmentId: environmentID,
-		Archived:      wrapperspb.Bool(true),
-		Comment:       "Archived automatically due to inactivity (environment setting)",
+		Id:                 featureID,
+		EnvironmentId:      environmentID,
+		Archived:           wrapperspb.Bool(true),
+		Comment:            "Archived automatically due to inactivity (environment setting)",
+		ReferenceWatermark: referenceWatermark,
 	})
 	if err != nil {
+		if status.Code(err) == codes.FailedPrecondition {
+			a.logger.Info("Archive deferred to the next round, references changed",
+				zap.String("featureId", featureID),
+				zap.String("environmentId", environmentID),
+				zap.Int64("referenceWatermark", referenceWatermark),
+			)
+			return domain.ErrArchiveDeferred
+		}
 		a.logger.Error("Failed to archive feature",
 			zap.String("featureId", featureID),
 			zap.String("environmentId", environmentID),

@@ -213,6 +213,14 @@ var (
 			pkgErr.FeaturePackageName,
 			"can't archive because this feature is used as a prerequisite").
 			WithMessageKey("InvalidArchive"))
+	// statusStaleReferenceWatermark is returned when an archive carrying a
+	// reference watermark detects a reference change newer than it at commit
+	// time. The automatic archiver abandons this round and retries later.
+	statusStaleReferenceWatermark = api.NewGRPCStatus(
+		pkgErr.NewErrorFailedPrecondition(
+			pkgErr.FeaturePackageName,
+			"can't archive because code references changed after the fixed watermark").
+			WithMessageKey("StaleReferenceWatermark"))
 	// flag trigger
 	statusMissingTriggerFeatureID = api.NewGRPCStatus(
 		pkgErr.NewErrorInvalidArgEmpty(pkgErr.FeaturePackageName, "missing trigger feature id", "FeatureFlagID"))

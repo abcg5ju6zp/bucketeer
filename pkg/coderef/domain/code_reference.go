@@ -65,6 +65,7 @@ func NewCodeReference(
 			EnvironmentId:    environmentId,
 			CreatedAt:        now,
 			UpdatedAt:        now,
+			Version:          1,
 		},
 	}, nil
 }
@@ -108,5 +109,6 @@ func (c *CodeReference) Update(
 		updated.CommitHash = commitHash
 	}
 	updated.UpdatedAt = time.Now().Unix()
+	updated.Version = c.Version + 1
 	return updated, nil
 }

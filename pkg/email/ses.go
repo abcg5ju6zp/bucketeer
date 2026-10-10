@@ -16,26 +16,28 @@ package email
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"go.uber.org/zap"
 )
 
-// SESService implements Service using Amazon SES
+// SESService implements Provider using Amazon SES.
 type SESService struct {
-	config   Config
-	logger   *zap.Logger
-	renderer *TemplateRenderer
-	client   *sesv2.Client
+	config Config
+	logger *zap.Logger
+	client *sesv2.Client
 }
 
-// NewSESService creates a new SES email service
-func NewSESService(emailConfig Config, logger *zap.Logger) (Service, error) {
+// NewSESService creates a new SES email service.
+func NewSESService(emailConfig Config, logger *zap.Logger) (*SESService, error) {
 	// Create AWS config with explicit credentials
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion(emailConfig.SES.Region),
@@ -52,57 +54,84 @@ func NewSESService(emailConfig Config, logger *zap.Logger) (Service, error) {
 	client := sesv2.NewFromConfig(cfg)
 
 	return &SESService{
-		config:   emailConfig,
-		logger:   logger,
-		renderer: NewTemplateRenderer(emailConfig),
-		client:   client,
+		config: emailConfig,
+		logger: logger,
+		client: client,
 	}, nil
 }
 
-func (s *SESService) SendWelcomeEmail(ctx context.Context, to string, language string) error {
-	subject, body := s.renderer.RenderWelcomeEmail(language, to)
-
-	err := s.sendEmail(ctx, to, subject, body)
-	if err != nil {
-		s.logger.Error("Failed to send welcome email",
-			zap.Error(err),
-			zap.String("to", to),
-		)
-		return fmt.Errorf("failed to send welcome email: %w", err)
-	}
-
-	s.logger.Info("Welcome email sent successfully",
-		zap.String("to", to),
-	)
-	return nil
+func (s *SESService) Name() string {
+	return "ses"
 }
 
-func (s *SESService) sendEmail(ctx context.Context, to, subject, body string) error {
+func (s *SESService) Send(ctx context.Context, req SendRequest) SendResult {
 	input := &sesv2.SendEmailInput{
 		FromEmailAddress: aws.String(s.config.Sender.Email),
 		Destination: &types.Destination{
-			ToAddresses: []string{to},
+			ToAddresses: []string{req.Snapshot.To},
 		},
 		Content: &types.EmailContent{
 			Simple: &types.Message{
 				Subject: &types.Content{
-					Data:    aws.String(subject),
+					Data:    aws.String(req.Snapshot.Subject),
 					Charset: aws.String("UTF-8"),
 				},
 				Body: &types.Body{
 					Html: &types.Content{
-						Data:    aws.String(body),
+						Data:    aws.String(req.Snapshot.Body),
 						Charset: aws.String("UTF-8"),
+					},
+				},
+				Headers: []types.MessageHeader{
+					{
+						Name:  aws.String(HeaderDeliveryID),
+						Value: aws.String(req.DeliveryID),
 					},
 				},
 			},
 		},
 	}
 
-	_, err := s.client.SendEmail(ctx, input)
+	out, err := s.client.SendEmail(ctx, input)
 	if err != nil {
-		return fmt.Errorf("failed to send email via SES: %w", err)
+		outcome := classifySESError(err)
+		s.logger.Error("Failed to send welcome email via SES",
+			zap.Error(err),
+			zap.String("to", req.Snapshot.To),
+		)
+		return SendResult{
+			Outcome: outcome,
+			Receipt: Receipt{Raw: errorRaw(err, 511)},
+			Err:     err,
+		}
 	}
 
-	return nil
+	receipt := Receipt{StatusCode: http.StatusOK}
+	if out.MessageId != nil {
+		receipt.MessageID = *out.MessageId
+	}
+	s.logger.Info("Welcome email sent successfully",
+		zap.String("to", req.Snapshot.To),
+		zap.String("messageId", receipt.MessageID),
+	)
+	return SendResult{Outcome: OutcomeAccepted, Receipt: receipt}
+}
+
+// classifySESError maps an SES error to an outcome.
+//
+// HTTP 429 and 5xx responses are explicit temporary failures (backoff), every
+// other received error is an explicit rejection (failover allowed), and errors
+// with no usable HTTP response (timeouts, connection failures) are uncertain
+// because SES may have accepted the message.
+func classifySESError(err error) Outcome {
+	var responseErr *smithyhttp.ResponseError
+	if errors.As(err, &responseErr) {
+		switch sc := responseErr.HTTPStatusCode(); {
+		case sc == http.StatusTooManyRequests || sc >= 500:
+			return OutcomeRetryable
+		default:
+			return OutcomeRejected
+		}
+	}
+	return OutcomeUnknown
 }

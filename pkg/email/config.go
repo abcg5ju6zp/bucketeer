@@ -62,6 +62,19 @@ type SenderConfig struct {
 	Name  string `json:"name"`
 }
 
+// FailoverConfig configures the backup provider policy. When enabled, an
+// explicit rejection from the primary provider allows switching to the next
+// configured provider in order. Failover never happens after a provider
+// accepted the message or when the response is merely uncertain.
+type FailoverConfig struct {
+	// Enabled turns on the failover policy. Defaults to false, preserving
+	// the single-provider behavior.
+	Enabled bool `json:"enabled"`
+	// Providers is the ordered list of backup provider names, e.g.
+	// ["ses", "sendgrid"].
+	Providers []string `json:"providers"`
+}
+
 // Config represents the email service configuration
 type Config struct {
 	Enabled    bool             `json:"enabled"`
@@ -73,4 +86,6 @@ type Config struct {
 	Sender     SenderConfig     `json:"sender"`
 	BaseURL    string           `json:"baseURL"` // Base URL for web console
 	Templates  TemplatesConfig  `json:"templates"`
+	// Failover configures the backup provider policy.
+	Failover FailoverConfig `json:"failover"`
 }

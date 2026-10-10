@@ -16,61 +16,85 @@ package email
 
 import (
 	"context"
-	"fmt"
+	"net/http"
 
+	"github.com/sendgrid/rest"
 	"github.com/sendgrid/sendgrid-go"
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 	"go.uber.org/zap"
 )
 
-// SendGridService implements Service using SendGrid
+// SendGridService implements Provider using SendGrid.
 type SendGridService struct {
-	config   Config
-	logger   *zap.Logger
-	renderer *TemplateRenderer
+	config Config
+	logger *zap.Logger
 }
 
-// NewSendGridService creates a new SendGrid email service
-func NewSendGridService(config Config, logger *zap.Logger) Service {
+// NewSendGridService creates a new SendGrid email service.
+func NewSendGridService(config Config, logger *zap.Logger) *SendGridService {
 	return &SendGridService{
-		config:   config,
-		logger:   logger,
-		renderer: NewTemplateRenderer(config),
+		config: config,
+		logger: logger,
 	}
 }
 
-func (s *SendGridService) SendWelcomeEmail(ctx context.Context, to string, language string) error {
-	subject, body := s.renderer.RenderWelcomeEmail(language, to)
-
-	err := s.sendEmail(ctx, to, subject, body)
-	if err != nil {
-		s.logger.Error("Failed to send welcome email",
-			zap.Error(err),
-			zap.String("to", to),
-		)
-		return fmt.Errorf("failed to send welcome email: %w", err)
-	}
-
-	s.logger.Info("Welcome email sent successfully",
-		zap.String("to", to),
-	)
-	return nil
+func (s *SendGridService) Name() string {
+	return "sendgrid"
 }
 
-func (s *SendGridService) sendEmail(ctx context.Context, to, subject, body string) error {
+func (s *SendGridService) Send(ctx context.Context, req SendRequest) SendResult {
 	from := mail.NewEmail(s.config.Sender.Name, s.config.Sender.Email)
-	toEmail := mail.NewEmail("", to)
-	message := mail.NewSingleEmail(from, subject, toEmail, "", body)
+	toEmail := mail.NewEmail("", req.Snapshot.To)
+	message := mail.NewSingleEmail(from, req.Snapshot.Subject, toEmail, "", req.Snapshot.Body)
+	// Carry the stable delivery identity as a message header.
+	message.Headers = map[string]string{
+		HeaderDeliveryID: req.DeliveryID,
+	}
 
 	client := sendgrid.NewSendClient(s.config.SendGrid.APIKey)
 	response, err := client.SendWithContext(ctx, message)
-	if err != nil {
-		return fmt.Errorf("failed to send email via SendGrid: %w", err)
+	if response == nil {
+		// No response at all: the result is uncertain.
+		s.logger.Error("Failed to send welcome email via SendGrid",
+			zap.Error(err),
+			zap.String("to", req.Snapshot.To),
+		)
+		return SendResult{
+			Outcome: OutcomeUnknown,
+			Receipt: Receipt{Raw: errorRaw(err, 511)},
+			Err:     err,
+		}
 	}
+	return classifySendGridResponse(response, err, s.logger)
+}
 
-	if response.StatusCode >= 400 {
-		return fmt.Errorf("SendGrid API error: status code %d, body: %s", response.StatusCode, response.Body)
+// classifySendGridResponse maps a SendGrid response to an outcome.
+func classifySendGridResponse(
+	response *rest.Response,
+	cause error,
+	logger *zap.Logger,
+) SendResult {
+	receipt := Receipt{
+		StatusCode: response.StatusCode,
+		MessageID:  http.Header(response.Headers).Get("X-Message-Id"),
 	}
-
-	return nil
+	switch sc := response.StatusCode; {
+	case sc >= 200 && sc < 300:
+		logger.Info("Welcome email sent successfully",
+			zap.String("messageId", receipt.MessageID),
+		)
+		return SendResult{Outcome: OutcomeAccepted, Receipt: receipt}
+	case sc == http.StatusTooManyRequests || sc >= 500:
+		logger.Warn("Temporary failure from SendGrid",
+			zap.Int("statusCode", sc),
+			zap.Error(cause),
+		)
+		return SendResult{Outcome: OutcomeRetryable, Receipt: receipt, Err: cause}
+	default:
+		logger.Error("Explicit rejection from SendGrid",
+			zap.Int("statusCode", sc),
+			zap.Error(cause),
+		)
+		return SendResult{Outcome: OutcomeRejected, Receipt: receipt, Err: cause}
+	}
 }

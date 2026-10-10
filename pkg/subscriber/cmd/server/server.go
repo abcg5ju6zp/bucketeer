@@ -36,6 +36,9 @@ import (
 	cachev3 "github.com/bucketeer-io/bucketeer/v2/pkg/cache/v3"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/cli"
 	"github.com/bucketeer-io/bucketeer/v2/pkg/email"
+	emaildeliverymysql "github.com/bucketeer-io/bucketeer/v2/pkg/email/storage/v2/mysql"
+	emaildeliverypostgres "github.com/bucketeer-io/bucketeer/v2/pkg/email/storage/v2/postgres"
+	emailstorage "github.com/bucketeer-io/bucketeer/v2/pkg/email/storage/v2"
 	environmentclient "github.com/bucketeer-io/bucketeer/v2/pkg/environment/client"
 	ecdwh "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/dwh_database"
 	ecbigquery "github.com/bucketeer-io/bucketeer/v2/pkg/eventcounter/storage/v2/dwh_database/bigquery"
@@ -384,6 +387,14 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		autoOpsRuleStorage = opmysql.NewAutoOpsRuleStorage(mysqlClient)
 	}
 
+	// Idempotent email-delivery storage, using the same operational database.
+	var deliveryStorage emailstorage.DeliveryStorage
+	if *s.operationalDatabaseType == "postgres" {
+		deliveryStorage = emaildeliverypostgres.NewDeliveryStorage(postgresClient)
+	} else {
+		deliveryStorage = emaildeliverymysql.NewDeliveryStorage(mysqlClient)
+	}
+
 	creds, err := client.NewPerRPCCredentials(*s.serviceTokenPath)
 	if err != nil {
 		return err
@@ -554,6 +565,7 @@ func (s *server) Run(ctx context.Context, metrics metrics.Metrics, logger *zap.L
 		autoOpsClient,
 		notificationSender,
 		cacheInvalidationPublisher,
+		deliveryStorage,
 		registerer,
 		logger,
 	)
@@ -1082,6 +1094,7 @@ func (s *server) registerPubSubProcessorMap(
 	opsClient autoopsclient.Client,
 	sender subscriptionsender.Sender,
 	cacheInvalidationPublisher publisher.Publisher,
+	deliveryStorage emailstorage.DeliveryStorage,
 	registerer metrics.Registerer,
 	logger *zap.Logger,
 ) (*processor.PubSubProcessors, func(), error) {
@@ -1177,6 +1190,8 @@ func (s *server) registerPubSubProcessorMap(
 		emailSender := processor.NewEmailSender(
 			processorsConfigMap[processor.EmailSenderName],
 			emailService,
+			accountStorage,
+			deliveryStorage,
 			logger,
 		)
 		processors.RegisterProcessor(

@@ -15,7 +15,6 @@
 package email
 
 import (
-	"context"
 	"testing"
 
 	"go.uber.org/zap"
@@ -102,12 +101,16 @@ func TestNoOpService(t *testing.T) {
 
 	logger := zap.NewNop()
 	service := NewNoOpService(logger)
-	ctx := context.Background()
 
-	t.Run("SendWelcomeEmail", func(t *testing.T) {
-		err := service.SendWelcomeEmail(ctx, "test@example.com", "en")
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+	t.Run("Disabled", func(t *testing.T) {
+		if !service.Disabled() {
+			t.Error("no-op service should report the email feature as disabled")
+		}
+	})
+
+	t.Run("Chain", func(t *testing.T) {
+		if len(service.Chain()) != 0 {
+			t.Errorf("no-op service should have no providers")
 		}
 	})
 }

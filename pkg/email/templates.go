@@ -71,6 +71,11 @@ var (
 </html>`
 )
 
+// TemplateVersion identifies the built-in email template version. It is frozen
+// into the delivery snapshot so the same logical email always renders with the
+// same template version.
+const TemplateVersion = "v1"
+
 // TemplateRenderer handles email template rendering with variable substitution
 type TemplateRenderer struct {
 	config Config
@@ -91,6 +96,18 @@ func (r *TemplateRenderer) getTemplateForLanguage(language string) TemplatesByLa
 		fallthrough
 	default:
 		return r.config.Templates.En
+	}
+}
+
+// ResolveLanguage returns the language actually used for the requested
+// language. Unknown languages fall back to English, preserving the original
+// fallback behavior.
+func (r *TemplateRenderer) ResolveLanguage(language string) string {
+	switch language {
+	case "ja":
+		return "ja"
+	default:
+		return "en"
 	}
 }
 

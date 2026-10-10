@@ -38,6 +38,7 @@ const (
 	ExperimentPackageName   = "experiment"
 	AuthPackageName         = "auth"
 	AIChatPackageName       = "aichat"
+	EmailPackageName        = "email"
 
 	invalidPrefix = "Invalid"
 )

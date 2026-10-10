@@ -16,78 +16,106 @@ package email
 
 import (
 	"context"
-	"fmt"
+	"net/http"
 
 	"github.com/mailersend/mailersend-go"
 	"go.uber.org/zap"
 )
 
-// MailerSendService implements Service using MailerSend
+// MailerSendService implements Provider using MailerSend.
 type MailerSendService struct {
-	config   Config
-	logger   *zap.Logger
-	renderer *TemplateRenderer
-	client   *mailersend.Mailersend
+	config Config
+	logger *zap.Logger
+	client *mailersend.Mailersend
 }
 
-// NewMailerSendService creates a new MailerSend email service
-func NewMailerSendService(config Config, logger *zap.Logger) Service {
+// NewMailerSendService creates a new MailerSend email service.
+func NewMailerSendService(config Config, logger *zap.Logger) *MailerSendService {
 	client := mailersend.NewMailersend(config.MailerSend.APIKey)
 
 	return &MailerSendService{
-		config:   config,
-		logger:   logger,
-		renderer: NewTemplateRenderer(config),
-		client:   client,
+		config: config,
+		logger: logger,
+		client: client,
 	}
 }
 
-func (s *MailerSendService) SendWelcomeEmail(ctx context.Context, to string, language string) error {
-	subject, body := s.renderer.RenderWelcomeEmail(language, to)
-
-	err := s.sendEmail(ctx, to, subject, body)
-	if err != nil {
-		s.logger.Error("Failed to send welcome email",
-			zap.Error(err),
-			zap.String("to", to),
-		)
-		return fmt.Errorf("failed to send welcome email: %w", err)
-	}
-
-	s.logger.Info("Welcome email sent successfully",
-		zap.String("to", to),
-	)
-	return nil
+func (s *MailerSendService) Name() string {
+	return "mailersend"
 }
 
-func (s *MailerSendService) sendEmail(ctx context.Context, to, subject, body string) error {
-	// Create the message using MailerSend's message builder
+func (s *MailerSendService) Send(ctx context.Context, req SendRequest) SendResult {
 	message := s.client.Email.NewMessage()
 
 	// Set sender
-	from := mailersend.From{
+	message.SetFrom(mailersend.From{
 		Name:  s.config.Sender.Name,
 		Email: s.config.Sender.Email,
-	}
-	message.SetFrom(from)
+	})
 
 	// Set recipient
-	recipients := []mailersend.Recipient{
+	message.SetRecipients([]mailersend.Recipient{
 		{
-			Email: to,
+			Email: req.Snapshot.To,
 		},
-	}
-	message.SetRecipients(recipients)
+	})
 
 	// Set subject and HTML body
-	message.SetSubject(subject)
-	message.SetHTML(body)
+	message.SetSubject(req.Snapshot.Subject)
+	message.SetHTML(req.Snapshot.Body)
+
+	// Carry the stable delivery identity as a custom header.
+	message.SetHeaders([]mailersend.Header{
+		{
+			Name:  HeaderDeliveryID,
+			Value: req.DeliveryID,
+		},
+	})
 
 	// Send the email
-	_, err := s.client.Email.Send(ctx, message)
-	if err != nil {
-		return fmt.Errorf("failed to send email via MailerSend: %w", err)
+	response, err := s.client.Email.Send(ctx, message)
+	if response == nil {
+		// No response at all: the result is uncertain.
+		s.logger.Error("Failed to send welcome email via MailerSend",
+			zap.Error(err),
+			zap.String("to", req.Snapshot.To),
+		)
+		return SendResult{
+			Outcome: OutcomeUnknown,
+			Receipt: Receipt{Raw: errorRaw(err, 511)},
+			Err:     err,
+		}
 	}
+	return classifyMailerSendResponse(response, err, s.logger)
+}
 
-	return nil
+// classifyMailerSendResponse maps a MailerSend response to an outcome.
+func classifyMailerSendResponse(
+	response *mailersend.Response,
+	cause error,
+	logger *zap.Logger,
+) SendResult {
+	receipt := Receipt{
+		StatusCode: response.StatusCode,
+		MessageID:  response.Header.Get("x-message-id"),
+	}
+	switch sc := response.StatusCode; {
+	case sc >= 200 && sc < 300:
+		logger.Info("Welcome email sent successfully",
+			zap.String("messageId", receipt.MessageID),
+		)
+		return SendResult{Outcome: OutcomeAccepted, Receipt: receipt}
+	case sc == http.StatusTooManyRequests || sc >= 500:
+		logger.Warn("Temporary failure from MailerSend",
+			zap.Int("statusCode", sc),
+			zap.Error(cause),
+		)
+		return SendResult{Outcome: OutcomeRetryable, Receipt: receipt, Err: cause}
+	default:
+		logger.Error("Explicit rejection from MailerSend",
+			zap.Int("statusCode", sc),
+			zap.Error(cause),
+		)
+		return SendResult{Outcome: OutcomeRejected, Receipt: receipt, Err: cause}
+	}
 }
